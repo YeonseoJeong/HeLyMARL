@@ -20,9 +20,9 @@ from core import generate_triangle_coverage
 from LyMARL.env import MAPPOEnvironment
 from LyMARL.trainer import MAPPOTrainer
 from benchmark.HeteroQMIXAgent import HeteroQMIXAgent, HeteroQMIXcfg
-import yaml 
-import json
+import matplotlib.pyplot as plt
 import random
+import time
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -67,6 +67,60 @@ def build_env(n_ue: int, n_bs: int, bs_top_k: int, power_budget_ratio: float,
         bs_over_penalty=bs_over_penalty,
     )
     return env
+
+def plot_reward(agent, window = 100, save_dir = "./results/plots"):
+    os.makedirs(save_dir,exist_ok=True)
+    steps = np.asarray(agent.step_history)
+    ue_rewards = np.asarray(agent.reward_history_ue, dtype = float)
+    bs_rewards = np.asarray(agent.reward_history_bs, dtype = float)
+    T = min(len(steps), len(ue_rewards), len(bs_rewards))
+    steps = steps[:T]
+    ue_rewards = ue_rewards[:T]
+    bs_rewards = bs_rewards[:T]
+
+    def moving_avg(x, w):
+        x = np.asarray(x, dtype=float)
+        if w is None or w<=1 or len(x) <w:
+            return x, steps
+        k = np.ones(w, dtype=float)/float(w)
+        y = np.convolve(x, k, mode='valid')
+        return y, steps[w-1:]
+    
+    ue_ma, ue_steps = moving_avg(ue_rewards,window)
+    fig, axes = plt.subplots(2,1, figsize=(14,8), sharex=True)
+    # =========================
+    # (1) UE Team Reward
+    # =========================
+    ax0 = axes[0]
+    ax0.plot(steps, ue_rewards, alpha =0.3, label="UE team reward (raw)")
+    ax0.plot(ue_steps ,ue_ma,linewidth =2, label =f"UE team reward (MA{window})")
+    ax0.set_ylabel("UE team Reward")
+    ax0.legend()
+    ax0.grid(True)
+
+    # =========================
+    # (2) BS Individual Rewards
+    # =========================
+    ax1 = axes[1]
+    n_bs = bs_rewards.shape[1]
+    for i in range(n_bs):
+        bs_i = bs_rewards[:,i]
+        bs_ma, bs_steps = moving_avg(bs_i, window)
+        ax1.plot(steps, bs_i, alpha=0.15)
+        ax1.plot(bs_steps, bs_ma, linewidth =1.0, label =f"BS{i} (MA{window})")
+    
+    ax1.set_xlabel("Steps")
+    ax1.set_ylabel("BS individual Reward")
+    ax1.legend()
+    ax1.grid(True)
+    plt.tight_layout()
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(save_dir, f"reward_plot_{ts}.png")
+    plt.savefig(out_path,dpi=200)
+    print(f"[plot_reward] saved to: {out_path}")
+    #plt.show()
+    plt.close(fig)
 
 def run_train(args):
     env = build_env(
@@ -135,6 +189,7 @@ def run_train(args):
             f"[DONE] last_update loss={last_u['loss']:.4f} (ue={last_u['loss_ue']:.4f}, bs={last_u['loss_bs']:.4f}) "
             f"| epsilon={last_u['epsilon']:.3f}"
         )
+    plot_reward(agent)
 
 @torch.no_grad()
 def run_eval(args):
@@ -174,6 +229,7 @@ def run_eval(args):
             f"  ep={ep_i:03d} | len={out['ep_len']:.0f} | r_ue_sum={out['ep_r_ue_sum']:.3f} "
             f"| r_bs_mean={out['ep_r_bs_mean']:.3f} | epsilon={out['epsilon']:.3f}"
         )
+    plot_reward(agent)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -185,7 +241,7 @@ def main():
     parser.add_argument("--n_bs", type=int, default=3)
     parser.add_argument("--bs_top_k", type=int, default=5)
     parser.add_argument("--power_budget_ratio", type=float, default=0.6)
-    parser.add_argument("--V", type=float, default=20.0)
+    parser.add_argument("--V", type=float, default=5.0)
     parser.add_argument("--enable_mobility", action="store_true", default=True)
     parser.add_argument("--enable_channel_variation", action="store_true", default=True)
     parser.add_argument("--hard_window_len", type=int, default=1000)
@@ -219,6 +275,7 @@ def main():
         run_train(args)
     else:
         run_eval(args)
+
 
 if __name__ == "__main__":
     main()

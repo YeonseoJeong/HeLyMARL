@@ -5,7 +5,7 @@
 """
 
 from dataclasses import dataclass
-from tqdm import trange,tqdm
+from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional
 import torch
 import torch.nn as nn
@@ -13,8 +13,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import random
-import gymnasium as gym
-import os, csv
 
 from benchmark.qmix import AgentNetwork, MixingNetwork
 from benchmark.replaybuffer import ReplayBufferRNN
@@ -63,6 +61,7 @@ class HeteroQMIXcfg:
     eps_start: float = 1.0
     eps_end: float = 0.05
     eps_decay: float = 0.99995
+    beta_bs_ind: float = 1.0
 
 
 class HeteroQMIXAgent:
@@ -105,17 +104,22 @@ class HeteroQMIXAgent:
         self.ue_mix = MixingNetwork(self.N_ue, self.state_dim, cfg.hidden_dim).to(self.device)
         self.ue_mix_tgt = MixingNetwork(self.N_ue, self.state_dim, cfg.hidden_dim).to(self.device)
 
-        # ----------------- BS (indiv TD only) ------------------
+        # ----------------- BS (Qtot + Qindiv) ------------------
         self.bs_net = AgentNetwork(self.bs_obs_dim, self.bs_act_dim, cfg.hidden_dim).to(self.device)
         self.bs_tgt = AgentNetwork(self.bs_obs_dim, self.bs_act_dim, cfg.hidden_dim).to(self.device)
+        self.bs_mix = MixingNetwork(self.N_bs, self.state_dim, cfg.hidden_dim).to(self.device)
+        self.bs_mix_tgt = MixingNetwork(self.N_bs, self.state_dim, cfg.hidden_dim).to(self.device)
 
         hard_update(self.ue_tgt, self.ue_net)
         hard_update(self.ue_mix_tgt, self.ue_mix)
         hard_update(self.bs_tgt, self.bs_net)
+        hard_update(self.bs_mix_tgt, self.bs_mix)
+
         params = (
             list(self.ue_net.parameters()) +
             list(self.ue_mix.parameters()) +
-            list(self.bs_net.parameters())
+            list(self.bs_net.parameters()) +
+            list(self.bs_mix.parameters())
         )
         self.optimizer = optim.Adam(params, lr=cfg.lr, amsgrad=True)
 
@@ -135,7 +139,9 @@ class HeteroQMIXAgent:
         self._cur_global_obs = None
         self._need_env_reset = True
 
-        self.no_req_penalty_coef = 0.5
+        self.reward_history_ue = []
+        self.reward_history_bs = []
+        self.step_history=[]
     
     def _decay_eps(self):
         self.eps = max(self.cfg.eps_end, self.eps * self.cfg.eps_decay)
@@ -311,12 +317,7 @@ class HeteroQMIXAgent:
                 
 
             # reward
-            rew_ue = float(info['ue_team_reward'])
-            no_req_idx = int(getattr(self.env, "no_request_action", self.ue_act_dim - 1))
-            no_req = sum(1 for a in ue_actions_arr if int(a) == no_req_idx)
-            ratio = no_req / max(1, self.N_ue)
-            rew_ue -= self.no_req_penalty_coef * max(0.0, ratio)
-            
+            rew_ue = float(info['ue_team_reward'])            
             rew_bs_vec = np.asarray(info["bs_rewards"], dtype=np.float32)  # (N_bs, )
             assert rew_bs_vec.shape[0] == self.N_bs
             ep_r_ue += rew_ue
@@ -357,7 +358,11 @@ class HeteroQMIXAgent:
             bs_next_mask.append(torch.tensor(bs_next_mask_batch, dtype=torch.bool, device="cpu"))
 
             local_obs, global_obs = next_local_obs, next_global_obs
+            self.reward_history_ue.append(rew_ue)
+            self.reward_history_bs.append(rew_bs_vec.copy())
+            self.step_history.append(self.total_env_steps)
             self.total_env_steps += 1
+
             Q_u = info.get("Q_u", None)
             Z_b = info.get("Z_b", None)
             if (self.total_env_steps % 50) == 0:
@@ -493,19 +498,23 @@ class HeteroQMIXAgent:
 
         q_tot, tq_tot = [], []
         for t in range(L):
-            q_tot.append(self.ue_mix(agent_qs[:, t], state[:, t]))          # (B, )
-            tq_tot.append(self.ue_mix_tgt(target_qs[:, t], next_state[:, t])) # (B, )
+            q_t, _ = self.ue_mix(agent_qs[:, t], state[:, t])
+            tq_t, _ = self.ue_mix_tgt(target_qs[:, t], next_state[:, t])
+            q_tot.append(q_t)       # (B, )
+            tq_tot.append(tq_t)     # (B, )
         q_tot = torch.stack(q_tot, dim=1)     # (B, L)
         tq_tot = torch.stack(tq_tot, dim=1)   # (B, L)
 
         done_any = done[:,:,0].float()
-        y = r_tot + self.cfg.gamma * (1.0 - done_any) * tq_tot
+        r_clipped = torch.clamp(r_tot, -10.0, 10.0)
+        y = r_clipped + self.cfg.gamma * (1.0 - done_any) * tq_tot
+        y = torch.clamp(y,-50.0,50.0)
         return F.smooth_l1_loss(q_tot, y.detach())
     
     # -------------------------
-    # BS individual TD loss (indiv reward)
+    # BS individual TD loss (tot + indiv reward)
     # -------------------------
-    def _loss_bs_indiv(self, batch) -> torch.Tensor:
+    def _loss_bs_tot_with_indiv(self, batch) -> torch.Tensor:
         obs, state, action, r_tot, next_obs, next_state, done, r_indiv, mask, next_mask = batch
 
         assert r_indiv is not None, "BS buffer must store individual rewards for indiv TD loss"
@@ -514,18 +523,18 @@ class HeteroQMIXAgent:
         assert r_indiv.shape == (B, L, Nb)
         assert next_mask is not None, "BS buffer must store next action mask for indiv TD loss"
 
-        losses=[]
+        agent_qs, target_qs =[], []
+
         for j in range(Nb):
             a_j = action[:, :, j]                  # (B, L)
             s_j = obs[:, :, j, :]                  # (B, L, obs)
             ns_j = next_obs[:, :, j, :]            # (B, L, obs)
-            r_ind_j = r_indiv[:, :, j]             # (B, L)
-            d_j = done[:, :, j].float()            # (B, L)
-
+            
             h = torch.zeros(B, self.bs_net.hidden_dim, device=self.device)  # (B, hidden_dim)
             h_tgt = torch.zeros_like(h)  # (B, hidden_dim)
 
-            q_sel_seq, tq_seq = [], []
+            q_seq, tq_seq = [], []
+
             for t in range(L):
                 obs_t = s_j[:, t]  # (B, obs_dim)
                 act_t = a_j[:, t]  # (B,)
@@ -539,8 +548,9 @@ class HeteroQMIXAgent:
                 
                 # online
                 q_all, h = self.bs_net(obs_t, a_prev_1hot, h)  # (B, A), (B, hidden_dim)
+                q_all = apply_mask_q(q_all, mask[:,t,j,:]) if mask is not None else q_all
                 q_sel = q_all.gather(-1, act_t.unsqueeze(-1)).squeeze(-1)  # (B, )
-                q_sel_seq.append(q_sel)  # (B, 1)
+                q_seq.append(q_sel)  # (B, 1)
 
                 with torch.no_grad():
                     _, h_tgt = self.bs_tgt(obs_t, a_prev_1hot, h_tgt)  # (B, A), (B, hidden_dim)
@@ -557,14 +567,38 @@ class HeteroQMIXAgent:
 
                     h_tgt = h_tgt_next
 
-            agent_q_seq = torch.stack(q_sel_seq,dim=1)    # (B,L)
-            target_q_seq = torch.stack(tq_seq,dim=1)      # (B,L)
+            agent_qs.append(torch.stack(q_seq, dim=1))   # (B,L)
+            target_qs.append(torch.stack(tq_seq, dim=1))      # (B,L)
 
-            y = r_ind_j + self.cfg.gamma * (1.0 - d_j) * target_q_seq
-            loss = F.smooth_l1_loss(agent_q_seq,y.detach())
-            losses.append(loss)
+        agent_qs = torch.stack(agent_qs, dim=-1)
+        target_qs = torch.stack(target_qs, dim=-1)
+        
+        #q_tot_list, tq_tot_list = [], []
+        q_ind_list, tq_ind_list = [], []
 
-        return torch.stack(losses).mean()
+        for t in range(L):
+            q_tot_t, q_ind_t = self.bs_mix(agent_qs[:,t],state[:,t])
+            tq_tot_t, tq_ind_t = self.bs_mix_tgt(target_qs[:,t], next_state[:,t])
+
+            #q_tot_list.append(q_tot_t)
+            #tq_tot_list.append(tq_tot_t)
+            q_ind_list.append(q_ind_t)
+            tq_ind_list.append(tq_ind_t)
+        
+        #q_tot = torch.stack(q_tot_list, dim=1)      # (B, L)
+        #tq_tot = torch.stack(tq_tot_list, dim=1)    # (B, L)
+        q_ind = torch.stack(q_ind_list, dim=1)      # (B, L, Nb)
+        tq_ind = torch.stack(tq_ind_list, dim=1)    # (B, L, Nb)
+
+        done_any = done[:, :, 0].float()            # (B, L)
+        r_ind_clamp = torch.clamp(r_indiv, -10.0, 10.0)
+        #y_tot = r_tot + self.cfg.gamma * (1.0-done_any) * tq_tot
+        y_ind = r_ind_clamp + self.cfg.gamma * (1.0-done_any).unsqueeze(-1) * tq_ind
+        y_ind = torch.clamp(y_ind, -50.0, 50.0)
+        #loss_tot = F.smooth_l1_loss(q_tot, y_tot.detach())
+        loss_ind = F.smooth_l1_loss(q_ind, y_ind.detach())
+
+        return loss_ind #loss_tot + float(self.cfg.beta_bs_ind) * loss_ind
     
     # -------------------------
     # Update
@@ -577,7 +611,7 @@ class HeteroQMIXAgent:
         batch_bs = self.buf_bs.sample(self.cfg.batch_size, self.cfg.seq_len, use_indiv=True)
     
         loss_ue = self._loss_ue_qmix(batch_ue)
-        loss_bs = self._loss_bs_indiv(batch_bs)
+        loss_bs = self._loss_bs_tot_with_indiv(batch_bs)
         loss = loss_ue + loss_bs
 
         self.optimizer.zero_grad()
@@ -588,6 +622,7 @@ class HeteroQMIXAgent:
         soft_update(self.ue_tgt, self.ue_net, self.cfg.tau)
         soft_update(self.ue_mix_tgt, self.ue_mix, self.cfg.tau)
         soft_update(self.bs_tgt, self.bs_net, self.cfg.tau)
+        soft_update(self.bs_mix_tgt, self.bs_mix, self.cfg.tau)
 
         return {"loss": float(loss.item()), 
                 "loss_ue": float(loss_ue.item()), 

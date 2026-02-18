@@ -45,6 +45,15 @@ class HyperNetwork(nn.Module):
 
 
 class MixingNetwork(nn.Module):
+    """
+    QMIX mixing + (optional) Q_ind head
+    Inputs:
+        agents_q: (B, N)
+        state: (B, S)
+    Outputs:
+        q_total: (B, )
+        q_ind: (B, N)
+    """
     def __init__(self, n_agents, state_dim, hidden_dim=64):
 
         super(MixingNetwork, self).__init__()
@@ -61,6 +70,8 @@ class MixingNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1) # Q_tot
         )
+        self.hyper_w_ind = HyperNetwork(state_dim, hidden_dim * n_agents)
+        self.hyper_b_ind = nn.Linear(state_dim, n_agents)
 
     def forward(self, agents_q, state): 
 
@@ -78,5 +89,11 @@ class MixingNetwork(nn.Module):
 
         q_total = torch.bmm(hidden.unsqueeze(1), w2).squeeze(1) + b2
         # q_total = [B, 1, hidden_dim] * [B, hidden_dim, 1] + [B, 1]
+        q_total = q_total.squeeze(-1) # (B,)
 
-        return q_total.squeeze(-1) # (B,)
+        w_ind = self.hyper_w_ind(state).view(-1, self.hidden_dim, self.n_agents)
+        b_ind = self.hyper_b_ind(state)
+
+        q_ind = torch.bmm(hidden.unsqueeze(1), w_ind).squeeze(1) + b_ind
+        # q_ind = [B, 1, hidden_dim] * [B, hidden_dim, n_agents] + [B, n_agents]
+        return q_total, q_ind 
