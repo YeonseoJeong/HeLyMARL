@@ -23,6 +23,7 @@ from benchmark.HeteroQMIXAgent import HeteroQMIXAgent, HeteroQMIXcfg
 import matplotlib.pyplot as plt
 import random
 import time
+import csv
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -35,57 +36,91 @@ def _sample_positions_uniform(n: int, low: float=10.0, high: float = 90.0) -> Li
     pts = np.random.uniform(low=low, high=high, size=(n, 2))
     return [(float(x), float(y)) for x, y in pts]
 
-def build_env(n_ue: int, n_bs: int, bs_top_k: int, power_budget_ratio: float,
-              V: float, enable_mobility: bool, enable_channel_variation: bool,
-              hard_window_len: int, on_window: int, bs_over_penalty: float):
-    # BS positions: triangle template + fill remainder uniformly
-    tri_pos = generate_triangle_coverage()
-    bs_pos = list(tri_pos[:min(len(tri_pos), n_bs)])
-    if len(bs_pos) < n_bs:
-        bs_pos += _sample_positions_uniform(n_bs - len(bs_pos))
+def save_logs_csv(logs, path = "./results/train_logs/train_log.csv"):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    keys = set()
+    for x in logs:
+        keys |= set(x.keys())
+    keys = sorted(list(keys))
 
-    base_stations = [
-        SmallCellBaseStation(bs_id = i+1, position=bs_pos[i], beam_limit=np.inf, coverage_radius=np.inf)
-        for i in range(n_bs)
-    ]
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        for x in logs:
+            w.writerow(x)
 
-    # UE positions (env.reset() will randomize again)
-    ue_pos = _sample_positions_uniform(n_ue)
-    users = [
-        UserEquipment(ue_id = i+1, position=ue_pos[i]) for i in range(n_ue)
-    ]
-    env = MAPPOEnvironment(
-        base_stations=base_stations,
-        users=users,
-        V=V,
-        power_budget_ratio=power_budget_ratio,
-        enable_mobility=enable_mobility,
-        enable_channel_variation=enable_channel_variation,
-        on_window=on_window,
-        bs_top_k=bs_top_k,
-        hard_window_len=hard_window_len,
-        bs_over_penalty=bs_over_penalty,
-    )
-    return env
+def moving_avg(x, w: int = 100):
+    x = np.asarray(x, dtype=float)
+    if w is None or w<=1 or len(x) <w:
+        return x, np.arange(len(x))
+    k = np.ones(w, dtype=float) / float(w)
+    y = np.convolve(x, k, mode='valid')
+    x = np.arange(w-1, w-1+len(y))
+    return y, x
 
-def plot_reward(agent, window = 100, save_dir = "./results/plots"):
-    os.makedirs(save_dir,exist_ok=True)
+def plot_train_metrics(logs, agent, window: int=100, save_dir: str = "./results/plots"):
+    os.makedirs(save_dir, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+
+    # =========================
+    # (A) logs 기반: thr/on/fair + loss
+    # =========================
+    step_cursor = 0
+    x_roll, thr_mean, on_ratio, fair_ep = [], [], [], []
+    x_upd, loss, loss_ue, loss_bs = [], [], [], []
+
+    for row in logs:
+        typ = row.get("type", "")
+        if typ == "rollout":
+            ep_len = int(float(row.get("ep_len", 0.0)))
+            step_cursor += max(0, ep_len)
+            x_roll.append(step_cursor)
+            thr_mean.append(float(row.get("thr_mean", float("nan"))))
+            on_ratio.append(float(row.get("on_ratio_mean", float("nan"))))
+            fair_ep.append(float(row.get("fair_ep", float("nan"))))
+        elif typ == "update":
+            x_upd.append(step_cursor)
+            loss_ue.append(float(row.get("loss_ue", float("nan"))))
+            loss_bs.append(float(row.get("loss_bs", float("nan"))))
+
+    def _plot(x, y, title, fname):
+        if len(x) == 0:
+            return
+        plt.figure(figsize=(10, 4))
+        plt.plot(x, y, alpha=0.35, label="raw")
+        y_ma, idx = moving_avg(y, window)
+        if len(y_ma) > 0:
+            plt.plot(np.asarray(x)[idx], y_ma, linewidth=2, label=f"MA{window}")
+        plt.title(title)
+        plt.xlabel("env steps (approx)")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        out = os.path.join(save_dir, f"{fname}_{ts}.png")
+        plt.savefig(out, dpi=180)
+        plt.close()
+        print(f"[plot] saved: {out}")
+
+    _plot(x_roll, thr_mean, "Throughput mean (thr_mean)", "thr_mean")
+    _plot(x_roll, on_ratio, "BS on ratio mean (on_ratio_mean)", "on_ratio_mean")
+    _plot(x_roll, fair_ep, "Jain fairness (fair_ep)", "fair_ep")
+    _plot(x_upd, loss_ue, "Loss (UE)", "loss_ue")
+    _plot(x_upd, loss_bs, "Loss (BS)", "loss_bs")
+
+    # =========================
+    # (B) agent 기반: UE/BS reward history
+    # =========================
     steps = np.asarray(agent.step_history)
     ue_rewards = np.asarray(agent.reward_history_ue, dtype = float)
     bs_rewards = np.asarray(agent.reward_history_bs, dtype = float)
+
     T = min(len(steps), len(ue_rewards), len(bs_rewards))
+    if T <= 0:
+        return
     steps = steps[:T]
     ue_rewards = ue_rewards[:T]
     bs_rewards = bs_rewards[:T]
 
-    def moving_avg(x, w):
-        x = np.asarray(x, dtype=float)
-        if w is None or w<=1 or len(x) <w:
-            return x, steps
-        k = np.ones(w, dtype=float)/float(w)
-        y = np.convolve(x, k, mode='valid')
-        return y, steps[w-1:]
-    
     ue_ma, ue_steps = moving_avg(ue_rewards,window)
     fig, axes = plt.subplots(2,1, figsize=(14,8), sharex=True)
     # =========================
@@ -121,6 +156,41 @@ def plot_reward(agent, window = 100, save_dir = "./results/plots"):
     print(f"[plot_reward] saved to: {out_path}")
     #plt.show()
     plt.close(fig)
+
+
+def build_env(n_ue: int, n_bs: int, bs_top_k: int, power_budget_ratio: float,
+              V: float, enable_mobility: bool, enable_channel_variation: bool,
+              hard_window_len: int, on_window: int, bs_over_penalty: float):
+    # BS positions: triangle template + fill remainder uniformly
+    tri_pos = generate_triangle_coverage()
+    bs_pos = list(tri_pos[:min(len(tri_pos), n_bs)])
+    if len(bs_pos) < n_bs:
+        bs_pos += _sample_positions_uniform(n_bs - len(bs_pos))
+
+    base_stations = [
+        SmallCellBaseStation(bs_id = i+1, position=bs_pos[i], beam_limit=np.inf, coverage_radius=np.inf)
+        for i in range(n_bs)
+    ]
+
+    # UE positions (env.reset() will randomize again)
+    ue_pos = _sample_positions_uniform(n_ue)
+    users = [
+        UserEquipment(ue_id = i+1, position=ue_pos[i]) for i in range(n_ue)
+    ]
+    env = MAPPOEnvironment(
+        base_stations=base_stations,
+        users=users,
+        V=V,
+        power_budget_ratio=power_budget_ratio,
+        enable_mobility=enable_mobility,
+        enable_channel_variation=enable_channel_variation,
+        on_window=on_window,
+        bs_top_k=bs_top_k,
+        hard_window_len=hard_window_len,
+        bs_over_penalty=bs_over_penalty,
+    )
+    return env
+
 
 def run_train(args):
     env = build_env(
@@ -186,10 +256,11 @@ def run_train(args):
     if updates:
         last_u = updates[-1]
         print(
-            f"[DONE] last_update loss={last_u['loss']:.4f} (ue={last_u['loss_ue']:.4f}, bs={last_u['loss_bs']:.4f}) "
+            f"[DONE] last_update loss= (ue={last_u['loss_ue']:.4f}, bs={last_u['loss_bs']:.4f}) " #{last_u['loss']:.4f}
             f"| epsilon={last_u['epsilon']:.3f}"
         )
-    plot_reward(agent)
+    plot_train_metrics(logs, agent, save_dir="./results/plots", window=100)
+    save_logs_csv(logs)
 
 @torch.no_grad()
 def run_eval(args):
@@ -229,7 +300,6 @@ def run_eval(args):
             f"  ep={ep_i:03d} | len={out['ep_len']:.0f} | r_ue_sum={out['ep_r_ue_sum']:.3f} "
             f"| r_bs_mean={out['ep_r_bs_mean']:.3f} | epsilon={out['epsilon']:.3f}"
         )
-    plot_reward(agent)
 
 def main():
     parser = argparse.ArgumentParser()
