@@ -96,4 +96,4 @@ class MixingNetwork(nn.Module):
 
         q_ind = torch.bmm(hidden.unsqueeze(1), w_ind).squeeze(1) + b_ind
         # q_ind = [B, 1, hidden_dim] * [B, hidden_dim, n_agents] + [B, n_agents]
-        return q_total, q_ind 
+        return q_total , q_ind 

@@ -134,18 +134,20 @@ def plot_train_metrics(logs, agent, window: int=100, save_dir: str = "./results/
     ax0.grid(True)
 
     # =========================
-    # (2) BS Individual Rewards
+    # (2) BS Team Reward
     # =========================
     ax1 = axes[1]
-    n_bs = bs_rewards.shape[1]
-    for i in range(n_bs):
-        bs_i = bs_rewards[:,i]
-        bs_ma, bs_steps = moving_avg(bs_i, window)
-        ax1.plot(steps, bs_i, alpha=0.15)
-        ax1.plot(bs_steps, bs_ma, linewidth =1.0, label =f"BS{i} (MA{window})")
-    
+    # n_bs = bs_rewards.shape[1]
+    # for i in range(n_bs):
+    #     bs_i = bs_rewards[:,i]
+    #     bs_ma, bs_steps = moving_avg(bs_i, window)
+    #     ax1.plot(steps, bs_i, alpha=0.15)
+    #     ax1.plot(bs_steps, bs_ma, linewidth =1.0, label =f"BS{i} (MA{window})")
+    ax1.plot(steps, bs_rewards, alpha=0.3, label="BS team reward (raw)")
+    bs_ma, bs_steps = moving_avg(bs_rewards, window)
+    ax1.plot(bs_steps, bs_ma, linewidth=2, label=f"BS team reward (MA{window})")
     ax1.set_xlabel("Steps")
-    ax1.set_ylabel("BS individual Reward")
+    ax1.set_ylabel("BS team Reward")
     ax1.legend()
     ax1.grid(True)
     plt.tight_layout()
@@ -247,7 +249,7 @@ def run_train(args):
         last = rollouts[-1]
         print(
             f"[DONE] env_steps={agent.total_env_steps} | last_ep_len={last['ep_len']:.0f} "
-            f"| last_ep_r_ue_sum={last['ep_r_ue_sum']:.3f} | last_ep_r_bs_mean={last['ep_r_bs_mean']:.3f} "
+            f"| last_ep_r_ue_sum={last['ep_r_ue_sum']:.3f} | last_ep_r_bs_sum={last['ep_r_bs_sum']:.3f} "
             f"| epsilon={last['epsilon']:.3f}"
             f"| thr_mean={last.get('thr_mean', float('nan')):.3f} "
             f"| fair_ep={last.get('fair_ep', float('nan')):.3f}"
@@ -298,7 +300,7 @@ def run_eval(args):
         out = agent.rollout_episode(n_steps=args.rollout_horizon)
         print(
             f"  ep={ep_i:03d} | len={out['ep_len']:.0f} | r_ue_sum={out['ep_r_ue_sum']:.3f} "
-            f"| r_bs_mean={out['ep_r_bs_mean']:.3f} | epsilon={out['epsilon']:.3f}"
+            f"| r_bs_sum={out['ep_r_bs_sum']:.3f} | epsilon={out['epsilon']:.3f}"
         )
 
 def main():
