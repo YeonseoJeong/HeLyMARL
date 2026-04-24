@@ -10,8 +10,7 @@ from env_happo import HAPPOEnvironment
 from trainer_happo import HAPPOTrainer
 
 
-if __name__ == "__main__":
-    seed = 0
+def make_env(seed, lambda_E):
     set_seed(seed)
 
     area_size = 100
@@ -19,19 +18,17 @@ if __name__ == "__main__":
 
     sbs_positions = generate_triangle_coverage(area_size, 35)
     sbs_list = [SmallCellBaseStation(i + 1, pos, 10, 35) for i, pos in enumerate(sbs_positions)]
+    
     users = [
         UserEquipment(i + 1, (np.random.uniform(10, 90), np.random.uniform(10, 90)))
         for i in range(num_users)
     ]
 
-    # --------------------------------------------------
-    # Training environment
-    # --------------------------------------------------
-    train_env = HAPPOEnvironment(
+    env = HAPPOEnvironment(
         base_stations=sbs_list,
         users=users,
         V=5.0,
-        power_budget_ratio=0.6,
+        power_budget_ratio=0.8,
         enable_mobility=True,
         enable_channel_variation=True,
         on_window=100,
@@ -42,12 +39,14 @@ if __name__ == "__main__":
         alpha_rate=3.0,
         beta_z=1.0,
         use_hard_constraint=False,   # training: no hard constraint
-        lambda_E=1.0,
-        kappa=0.2
+        lambda_E=lambda_E,
+        kappa=0.05
     )
+    return env
 
-    trainer = HAPPOTrainer(
-        env=train_env,
+def make_trainer(env):
+    return HAPPOTrainer(
+        env=env,
         lr_actor_ue=3e-4,
         lr_actor_bs=3e-4,
         lr_critic=1e-3,
@@ -61,30 +60,42 @@ if __name__ == "__main__":
         minibatch_size=256
     )
 
-    # --------------------------------------------------
-    # Train
-    # --------------------------------------------------
-    train_steps = 50000
-    train_npz_path = "LyMARL_train_rewards.npz"
-    model_path = "LyMARL.pt"
+if __name__ == "__main__":
+    seed = 0
+    lambda_list = [0.1, 0.5, 1.0]
 
-    trainer.train(
-        n_steps=train_steps,
-        update_interval=128,
-        save_npz_path=train_npz_path,
-    )
+    os.makedirs("results_lambda", exist_ok=True)
 
-    trainer.save_model(model_path)
+    for lam in lambda_list:
+        print(f"\n=== Training with lambda_E = {lam} ===")
+        
+        env = make_env(seed, lam)
+        trainer = make_trainer(env)
+        
+        # --------------------------------------------------
+        # Train
+        # --------------------------------------------------
+        train_steps = 50000
+        train_npz_path = f"results_lambda/LyMARL_train_rewards_lambda_{lam}.npz"
+        model_path = f"results_lambda/LyMARL_model_lambda_{lam}.pt"
 
-    print(f"\n✅ Training rewards saved to: {os.path.abspath(train_npz_path)}")
-    print(f"✅ Model saved to: {os.path.abspath(model_path)}")
+        trainer.train(
+            n_steps=train_steps,
+            update_interval=128,
+            save_npz_path=train_npz_path
+        )
 
-    # --------------------------------------------------
-    #enable hard constraint only for eval
-    # --------------------------------------------------
-    trainer.env.set_hard_constraint(True)
+        trainer.save_model(model_path)
 
-    eval_npz_path = None
-    trainer.evaluate(n_steps=100000, save_npz_path=eval_npz_path)
+        # --------------------------------------------------
+        #enable hard constraint only for eval
+        # --------------------------------------------------
+        trainer.env.set_hard_constraint(True)
+
+        eval_npz_path = f"results_lambda/LyMARL_eval_rewards_lambda_{lam}.npz"
+        trainer.evaluate(
+            n_steps=100000, 
+            save_npz_path=eval_npz_path
+        )
 
     print("\n✅ Completed!\n")

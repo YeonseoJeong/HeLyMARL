@@ -421,6 +421,14 @@ class HAPPOTrainer:
         global_reward_hist = []
         ue_per_user_reward_hist = []
 
+        # loss histories, recorded per PPO update
+        update_step_history = []
+        critic_loss_history = []
+        actor_ue_loss_history = []
+        actor_bs_loss_history = []
+        entropy_ue_history = []
+        entropy_bs_history = []
+
         local_obs, global_obs = self.env.reset()
 
         for step in range(n_steps):
@@ -478,6 +486,13 @@ class HAPPOTrainer:
             if (step + 1) % update_interval == 0:
                 losses = self.update()
                 if losses:
+                    update_step_history.append(step + 1)
+                    critic_loss_history.append(float(losses["critic"]))
+                    actor_ue_loss_history.append(float(losses["actor_ue"]))
+                    actor_bs_loss_history.append(float(losses["actor_bs"]))
+                    entropy_ue_history.append(float(losses["entropy_ue"]))
+                    entropy_bs_history.append(float(losses["entropy_bs"]))
+
                     print(
                         f"[UPDATE] Step {step+1} | "
                         f"UE_Actor:{losses['actor_ue']:.4f} | BS_Actor:{losses['actor_bs']:.4f} | "
@@ -512,6 +527,14 @@ class HAPPOTrainer:
 
             "global_reward": global_reward_hist,
             "ue_per_user_reward": ue_per_user_reward_hist,
+
+            # loss curves
+            "update_step_history": update_step_history,
+            "critic_loss_history": critic_loss_history,
+            "actor_ue_loss_history": actor_ue_loss_history,
+            "actor_bs_loss_history": actor_bs_loss_history,
+            "entropy_ue_history": entropy_ue_history,
+            "entropy_bs_history": entropy_bs_history,
         }
 
         if save_npz_path is not None:
@@ -535,11 +558,23 @@ class HAPPOTrainer:
         fairness_history = []
         power_history = {bs.bs_id: [] for bs in self.env.base_stations}
         slot_rates = []
-
         global_reward_hist = []
-        ue_per_user_reward_hist = []
-
+        ue_per_user_reward_hist = []      
+        
         eval_on100_hist = {bs.bs_id: [] for bs in self.env.base_stations}
+
+        # --------------------------------------------------
+        # New metric histories
+        # --------------------------------------------------
+        handover_count_history = []       # slot-wise total handover count
+        handover_ratio_history = []       # slot-wise handover ratio = HO / #UE
+
+        served_ratio_history = []         # optional QoE
+        outage_ratio_history = []         # optional QoE
+
+        Q_mean_history = []
+        Z_mean_history = []
+        G_mean_history = []
 
         local_obs, global_obs = self.env.reset()
 
@@ -558,6 +593,32 @@ class HAPPOTrainer:
             rates_this_slot = [info["served_rates"][u.ue_id] for u in self.env.users]
             slot_rates.append(rates_this_slot)
             fairness_history.append(self.env.calculate_jain_fairness(slot_rates))
+
+            # --------------------------------------------------
+            # Handover metric
+            # --------------------------------------------------
+            ho_count = float(info["total_HO_count"])
+            handover_count_history.append(ho_count)
+            handover_ratio_history.append(ho_count / max(1, self.env.n_agents))
+
+            # --------------------------------------------------
+            # Optional QoE / outage metric
+            # served user = rate > 0
+            # --------------------------------------------------
+            served_flags = np.array(
+                [1.0 if info["served_rates"][u.ue_id] > 0.0 else 0.0 for u in self.env.users],
+                dtype=np.float32
+            )
+            served_ratio = float(np.mean(served_flags))
+            served_ratio_history.append(served_ratio)
+            outage_ratio_history.append(1.0 - served_ratio)
+
+            # --------------------------------------------------
+            # Queue mean histories
+            # --------------------------------------------------
+            Q_mean_history.append(float(np.mean(list(info["Q_u"].values()))))
+            Z_mean_history.append(float(np.mean(list(info["Z_b"].values()))))
+            G_mean_history.append(float(np.mean(list(info["G_u"].values()))))
 
             for bs_id, power in info["power_consumed"].items():
                 power_history[bs_id].append(power)
@@ -610,6 +671,16 @@ class HAPPOTrainer:
             "slot_rates": slot_rates,
             "global_reward": global_reward_hist,
             "ue_per_user_reward": ue_per_user_reward_hist,
+            
+            "handover_count_history": handover_count_history,
+            "handover_ratio_history": handover_ratio_history,
+
+            "served_ratio_history": served_ratio_history,
+            "outage_ratio_history": outage_ratio_history,
+
+            "Q_mean_history": Q_mean_history,
+            "Z_mean_history": Z_mean_history,
+            "G_mean_history": G_mean_history,
         }
 
         if save_npz_path is not None:
@@ -628,6 +699,23 @@ class HAPPOTrainer:
 
         global_reward = np.asarray(results.get("global_reward", []), dtype=np.float32)
         ue_per_user = np.asarray(results.get("ue_per_user_reward", []), dtype=np.float32)
+
+        handover_count = np.asarray(results.get("handover_count_history", []), dtype=np.float32)
+        handover_ratio = np.asarray(results.get("handover_ratio_history", []), dtype=np.float32)
+
+        served_ratio = np.asarray(results.get("served_ratio_history", []), dtype=np.float32)
+        outage_ratio = np.asarray(results.get("outage_ratio_history", []), dtype=np.float32)
+
+        Q_mean = np.asarray(results.get("Q_mean_history", []), dtype=np.float32)
+        Z_mean = np.asarray(results.get("Z_mean_history", []), dtype=np.float32)
+        G_mean = np.asarray(results.get("G_mean_history", []), dtype=np.float32)
+
+        update_steps = np.asarray(results.get("update_step_history", []), dtype=np.int32)
+        critic_loss = np.asarray(results.get("critic_loss_history", []), dtype=np.float32)
+        actor_ue_loss = np.asarray(results.get("actor_ue_loss_history", []), dtype=np.float32)
+        actor_bs_loss = np.asarray(results.get("actor_bs_loss_history", []), dtype=np.float32)
+        entropy_ue = np.asarray(results.get("entropy_ue_history", []), dtype=np.float32)
+        entropy_bs = np.asarray(results.get("entropy_bs_history", []), dtype=np.float32)
 
         if ue_per_user.ndim == 2 and ue_per_user.shape[0] > 0:
             mean_user_reward_step = ue_per_user.mean(axis=1).astype(np.float32)
@@ -658,6 +746,55 @@ class HAPPOTrainer:
             power_mat.append(np.asarray(power_hist[bs_id], dtype=np.float32))
         power_mat = np.stack(power_mat, axis=0) if len(power_mat) > 0 else np.zeros((0, len(thr)), dtype=np.float32)
 
+        # --------------------------------------------------
+        # Energy constraint metrics
+        # --------------------------------------------------
+        # power_mat shape: [n_bs, T]
+        # P_max is used when BS is ON, 0 when OFF
+        if power_mat.size > 0:
+            bs_on_mat = (power_mat > 0.0).astype(np.float32)       # [n_bs, T]
+            bs_on_ratio_per_bs = bs_on_mat.mean(axis=1)            # [n_bs]
+            bs_on_ratio_mean = np.asarray([bs_on_ratio_per_bs.mean()], dtype=np.float32)
+
+            energy_budget_ratio = np.asarray([self.env.power_budget_ratio], dtype=np.float32)
+            energy_violation_per_bs = np.maximum(
+                0.0,
+                bs_on_ratio_per_bs - self.env.power_budget_ratio
+            ).astype(np.float32)
+            energy_violation_mean = np.asarray([energy_violation_per_bs.mean()], dtype=np.float32)
+            energy_violation_ratio = np.asarray(
+                [float(np.mean(bs_on_ratio_per_bs > self.env.power_budget_ratio))],
+                dtype=np.float32
+            )
+        else:
+            bs_on_ratio_per_bs = np.asarray([], dtype=np.float32)
+            bs_on_ratio_mean = np.asarray([], dtype=np.float32)
+            energy_budget_ratio = np.asarray([self.env.power_budget_ratio], dtype=np.float32)
+            energy_violation_per_bs = np.asarray([], dtype=np.float32)
+            energy_violation_mean = np.asarray([], dtype=np.float32)
+            energy_violation_ratio = np.asarray([], dtype=np.float32)
+
+        # --------------------------------------------------
+        # Handover constraint metrics
+        # --------------------------------------------------
+        # handover_ratio is slot-wise: total HO per slot / num_users
+        if handover_ratio.size > 0:
+            handover_ratio_mean = np.asarray([float(np.mean(handover_ratio))], dtype=np.float32)
+            handover_budget_ratio = np.asarray([float(self.env.kappa)], dtype=np.float32)
+            handover_violation_mean = np.asarray(
+                [float(max(0.0, np.mean(handover_ratio) - self.env.kappa))],
+                dtype=np.float32
+            )
+            handover_violation_flag = np.asarray(
+                [float(np.mean(handover_ratio) > self.env.kappa)],
+                dtype=np.float32
+            )
+        else:
+            handover_ratio_mean = np.asarray([], dtype=np.float32)
+            handover_budget_ratio = np.asarray([float(self.env.kappa)], dtype=np.float32)
+            handover_violation_mean = np.asarray([], dtype=np.float32)
+            handover_violation_flag = np.asarray([], dtype=np.float32)
+
         np.savez_compressed(
             npz_path,
             tag=str(tag),
@@ -680,5 +817,40 @@ class HAPPOTrainer:
 
             bs_ids=np.asarray(bs_ids_sorted, dtype=np.int32),
             power_mat=power_mat,
+
+            # performance
+            handover_count=handover_count,
+            handover_ratio=handover_ratio,
+            handover_ratio_mean=handover_ratio_mean,
+
+            bs_on_ratio_per_bs=bs_on_ratio_per_bs,
+            bs_on_ratio_mean=bs_on_ratio_mean,
+
+            # constraint
+            energy_budget_ratio=energy_budget_ratio,
+            energy_violation_per_bs=energy_violation_per_bs,
+            energy_violation_mean=energy_violation_mean,
+            energy_violation_ratio=energy_violation_ratio,
+
+            handover_budget_ratio=handover_budget_ratio,
+            handover_violation_mean=handover_violation_mean,
+            handover_violation_flag=handover_violation_flag,
+
+            # optional QoE
+            served_ratio=served_ratio,
+            outage_ratio=outage_ratio,
+
+            # queue
+            Q_mean=Q_mean,
+            Z_mean=Z_mean,
+            G_mean=G_mean,
+
+            # losses
+            update_steps=update_steps,
+            critic_loss=critic_loss,
+            actor_ue_loss=actor_ue_loss,
+            actor_bs_loss=actor_bs_loss,
+            entropy_ue=entropy_ue,
+            entropy_bs=entropy_bs,
         )
         print(f"✅ Saved results npz: {npz_path}")

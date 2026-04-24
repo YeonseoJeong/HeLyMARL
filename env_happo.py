@@ -30,7 +30,7 @@ class HAPPOEnvironment:
         beta_z: float = 1.0,
         use_hard_constraint: bool = False,
         lambda_E: float = 1.0,
-        kappa: float = 0.2
+        kappa: float = 0.02
     ):
         self.base_stations = [bs for bs in base_stations if bs.bs_id != 0]
         self.users = users
@@ -83,7 +83,7 @@ class HAPPOEnvironment:
         # Channel / mobility
         self.noise_dbm = -174 + 10 * np.log10(500e6) + 5
         self.noise_watts = 10 ** (self.noise_dbm / 10) / 1000
-        self.mobility_speed = 0.5
+        self.mobility_speed = 1
         self.area_size = 100
         self.channel_gains = defaultdict(dict)
         self.fading_std = 4.0
