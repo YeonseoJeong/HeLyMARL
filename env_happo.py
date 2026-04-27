@@ -703,15 +703,24 @@ class HAPPOEnvironment:
     # =========================================================
     # Metric
     # =========================================================
-    def calculate_jain_fairness(self, rate_history: List) -> float:
-        """
-        Jain's fairness computed from the most recent up to 100 slots.
-        """
-        recent = rate_history if len(rate_history) < 100 else rate_history[-100:]
+    def calculate_jain_fairness(self, rate_history, window: int = 100, exclude_all_zero_slots: bool = True):
+        recent = rate_history if len(rate_history) < window else rate_history[-window:]
+
         if not recent:
             return 0.0
 
-        rate_array = np.array(recent)
+        rate_array = np.asarray(recent, dtype=np.float32)
+
+        if rate_array.ndim != 2:
+            return 0.0
+
+        if exclude_all_zero_slots:
+            active_slot_mask = np.sum(rate_array, axis=1) > 1e-12
+            rate_array = rate_array[active_slot_mask]
+
+            if rate_array.shape[0] == 0:
+                return 0.0
+
         per_user_avg = rate_array.mean(axis=0)
 
         sum_rates = per_user_avg.sum()

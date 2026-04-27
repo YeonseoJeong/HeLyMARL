@@ -18,6 +18,12 @@ def safe_get(data, key, default=None):
         return data[key]
     return default
 
+def safe_get_any(data, keys, default=None):
+    for key in keys:
+        if key in data.files:
+            return data[key]
+    return default
+
 
 def moving_average(x, window=100):
     x = np.asarray(x, dtype=np.float32)
@@ -51,21 +57,47 @@ def parse_lambda(path):
 
     raise ValueError(f"Cannot parse lambda from filename: {name}")
 
+def infer_eval_variant(path):
+    name = os.path.basename(path).lower()
 
-def sorted_npz_files(result_dir, prefix):
+    if "soft" in name:
+        return "soft"
+    if "hard" in name:
+        return "hard"
+
+    # 기존 LyMARL_eval_rewards_lambda_*.npz 같은 파일이 남아있는 경우
+    return "unknown"
+
+def sorted_npz_files(result_dir, prefix, eval_variant="soft"):
     """
     prefix: 'train' or 'eval'
-    Matches:
-    LyMARL_train_rewards_lambda_0.1.npz
-    LyMARL_eval_rewards_lambda_0.1.npz
+
+    eval_variant:
+        'soft' -> only eval soft files
+        'hard' -> only eval hard files
+        'all'  -> all eval files
     """
     all_npz = glob.glob(os.path.join(result_dir, "**", "*.npz"), recursive=True)
 
     files = []
     for f in all_npz:
         name = os.path.basename(f).lower()
-        if prefix.lower() in name and "lambda_" in name:
-            files.append(f)
+
+        if prefix.lower() not in name:
+            continue
+        if "lambda_" not in name:
+            continue
+
+        if prefix.lower() == "eval":
+            variant = infer_eval_variant(f)
+
+            if eval_variant in ["soft", "hard"]:
+                if variant != eval_variant:
+                    continue
+
+            # eval_variant == "all"이면 hard/soft 모두 포함
+
+        files.append(f)
 
     files = sorted(files, key=parse_lambda)
     return files
@@ -123,7 +155,7 @@ def save_bar_summary(lams, values, xlabel, ylabel, title, save_path, budget=None
 # =========================================================
 # Train plots: one figure per metric, 5 lambda lines
 # =========================================================
-def plot_train_curves_all_lambdas(train_files, plot_dir, reward_window=500):
+def plot_train_curves_all_lambdas(train_files, plot_dir, reward_window=10000):
     labels = [rf"$\lambda_E={parse_lambda(f)}$" for f in train_files]
 
     # -----------------------------------------------------
@@ -133,13 +165,13 @@ def plot_train_curves_all_lambdas(train_files, plot_dir, reward_window=500):
     for f in train_files:
         data = load_npz(f)
 
-        reward_x_500 = safe_get(data, "reward_x_500", None)
-        global_reward_500 = safe_get(data, "global_reward_500", None)
+        reward_x_1000 = safe_get(data, "reward_x_1000", None)
+        global_reward_1000 = safe_get(data, "global_reward_1000", None)
         global_reward = safe_get(data, "global_reward", np.array([]))
 
-        if reward_x_500 is not None and global_reward_500 is not None and len(global_reward_500) > 0:
-            x = reward_x_500
-            y = global_reward_500
+        if reward_x_1000 is not None and global_reward_1000 is not None and len(global_reward_1000) > 0:
+            x = reward_x_1000
+            y = global_reward_1000
         else:
             y = moving_average(global_reward, reward_window)
             x = np.arange(len(y)) + reward_window - 1 if len(global_reward) >= reward_window else np.arange(len(y))
@@ -296,8 +328,62 @@ def plot_train_curves_all_lambdas(train_files, plot_dir, reward_window=500):
 # =========================================================
 # Eval time-series plots: one figure per metric, 5 lambda lines
 # =========================================================
-def plot_eval_timeseries_all_lambdas(eval_files, plot_dir, smooth_window=1000):
-    labels = [rf"$\lambda_E={parse_lambda(f)}$" for f in eval_files]
+def plot_queue_timeseries_all_lambdas(files, plot_dir, prefix, smooth_window=1000, eval_variant=None):
+    """
+    Plot Q, Z, G mean queue trajectories.
+
+    One figure per lambda.
+    x-axis: step
+    y-axis: mean queue value
+    legend: Q, Z, G
+    """
+
+    for f in files:
+        data = load_npz(f)
+        lam = parse_lambda(f)
+
+        Q = safe_get(data, "Q_mean", np.array([]))
+        Z = safe_get(data, "Z_mean", np.array([]))
+        G = safe_get(data, "G_mean", np.array([]))
+
+        if len(Q) == 0 and len(Z) == 0 and len(G) == 0:
+            print(f"[Warning] No Q_mean/Z_mean/G_mean found in {f}")
+            print(f"Available keys: {data.files}")
+            continue
+
+        plt.figure(figsize=(7, 5))
+
+        for y, name in [(Q, "Q"), (Z, "Z"), (G, "G")]:
+            if len(y) == 0:
+                continue
+
+            y_smooth = moving_average(y, smooth_window)
+
+            if len(y) >= smooth_window:
+                x = np.arange(len(y_smooth)) + smooth_window - 1
+            else:
+                x = np.arange(len(y_smooth))
+
+            plt.plot(x, y_smooth, linewidth=2, label=name)
+
+        plt.xlabel("Step")
+        plt.ylabel("Mean Queue Value")
+        plt.title(prefix.capitalize() + " Mean Queue Trajectories " + rf"$(\lambda_E={lam})$")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+
+        if eval_variant is not None:
+            save_name = f"{prefix}_{eval_variant}_mean_queue_QZG_lambda_{lam:g}.png"
+        else:
+            save_name = f"{prefix}_mean_queue_QZG_lambda_{lam:g}.png"
+        plt.savefig(os.path.join(plot_dir, save_name), dpi=300)
+        plt.close()
+
+
+def plot_eval_timeseries_all_lambdas(eval_files, plot_dir, smooth_window=1000, eval_variant="soft"):
+    labels = [rf"$\lambda_E={parse_lambda(f):g}$" for f in eval_files]
+    suffix = f"_{eval_variant}" if eval_variant in ["soft", "hard"] else ""
 
     # -----------------------------------------------------
     # 1) Throughput
@@ -318,7 +404,7 @@ def plot_eval_timeseries_all_lambdas(eval_files, plot_dir, smooth_window=1000):
         xlabel="Evaluation Step",
         ylabel="Throughput [Gbps]",
         title="Evaluation Throughput",
-        save_path=os.path.join(plot_dir, "eval_throughput_all_lambdas.png")
+        save_path=os.path.join(plot_dir, f"eval{suffix}_throughput_all_lambdas.png")
     )
 
     # -----------------------------------------------------
@@ -340,7 +426,7 @@ def plot_eval_timeseries_all_lambdas(eval_files, plot_dir, smooth_window=1000):
         xlabel="Evaluation Step",
         ylabel="Jain's Fairness Index",
         title="Evaluation JFI",
-        save_path=os.path.join(plot_dir, "eval_jfi_all_lambdas.png")
+        save_path=os.path.join(plot_dir, f"eval{suffix}_jfi_all_lambdas.png")
     )
 
     # -----------------------------------------------------
@@ -368,7 +454,7 @@ def plot_eval_timeseries_all_lambdas(eval_files, plot_dir, smooth_window=1000):
         xlabel="Evaluation Step",
         ylabel="Handover Ratio",
         title="Evaluation Handover Ratio",
-        save_path=os.path.join(plot_dir, "eval_handover_ratio_all_lambdas.png"),
+        save_path=os.path.join(plot_dir, f"eval{suffix}_handover_ratio_all_lambdas.png"),
         hline=h_budget,
         hline_label="Handover Budget"
     )
@@ -406,7 +492,7 @@ def plot_eval_timeseries_all_lambdas(eval_files, plot_dir, smooth_window=1000):
         xlabel="Evaluation Step",
         ylabel="BS ON Ratio",
         title="Evaluation BS ON Ratio",
-        save_path=os.path.join(plot_dir, "eval_on_ratio_all_lambdas.png"),
+        save_path=os.path.join(plot_dir, f"eval{suffix}_on_ratio_all_lambdas.png"),
         hline=e_budget,
         hline_label="Energy Budget"
     )
@@ -452,9 +538,10 @@ def summarize_eval_npz(path, last_window=10000):
     }
 
 
-def plot_eval_summary_vs_lambda(eval_files, plot_dir, last_window=10000):
+def plot_eval_summary_vs_lambda(eval_files, plot_dir, last_window=10000, eval_variant="soft"):
     summaries = [summarize_eval_npz(f, last_window) for f in eval_files]
     summaries = sorted(summaries, key=lambda x: x["lambda"])
+    suffix = f"_{eval_variant}" if eval_variant in ["soft", "hard"] else ""
 
     lams = np.array([s["lambda"] for s in summaries], dtype=np.float32)
     thr = np.array([s["throughput"] for s in summaries], dtype=np.float32)
@@ -474,7 +561,7 @@ def plot_eval_summary_vs_lambda(eval_files, plot_dir, last_window=10000):
     plt.title("Throughput vs " + r"$\lambda_E$")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(plot_dir, "summary_throughput_vs_lambda.png"), dpi=300)
+    plt.savefig(os.path.join(plot_dir, f"summary{suffix}_throughput_vs_lambda.png"), dpi=300)
     plt.close()
 
     # 2) JFI vs lambda
@@ -485,7 +572,7 @@ def plot_eval_summary_vs_lambda(eval_files, plot_dir, last_window=10000):
     plt.title("JFI vs " + r"$\lambda_E$")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(plot_dir, "summary_jfi_vs_lambda.png"), dpi=300)
+    plt.savefig(os.path.join(plot_dir, f"summary{suffix}_jfi_vs_lambda.png"), dpi=300)
     plt.close()
 
     # 3) ON ratio vs lambda
@@ -499,7 +586,7 @@ def plot_eval_summary_vs_lambda(eval_files, plot_dir, last_window=10000):
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(plot_dir, "summary_on_ratio_vs_lambda.png"), dpi=300)
+    plt.savefig(os.path.join(plot_dir, f"summary{suffix}_on_ratio_vs_lambda.png"), dpi=300)
     plt.close()
 
     # 4) Handover ratio vs lambda
@@ -513,7 +600,7 @@ def plot_eval_summary_vs_lambda(eval_files, plot_dir, last_window=10000):
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(plot_dir, "summary_handover_ratio_vs_lambda.png"), dpi=300)
+    plt.savefig(os.path.join(plot_dir, f"summary{suffix}_handover_ratio_vs_lambda.png"), dpi=300)
     plt.close()
 
     # 5) Constraint violation bar
@@ -530,7 +617,7 @@ def plot_eval_summary_vs_lambda(eval_files, plot_dir, last_window=10000):
     plt.grid(True, axis="y", alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(plot_dir, "summary_constraint_violations_vs_lambda.png"), dpi=300)
+    plt.savefig(os.path.join(plot_dir, f"summary{suffix}_constraint_violations_vs_lambda.png"), dpi=300)
     plt.close()
 
 
@@ -543,6 +630,13 @@ def main():
     parser.add_argument("--mode", type=str, default="all", choices=["all", "train", "eval", "summary"])
     parser.add_argument("--last_window", type=int, default=10000)
     parser.add_argument("--smooth_window", type=int, default=1000)
+    parser.add_argument(
+        "--eval_variant",
+        type=str,
+        default="soft",
+        choices=["soft", "hard", "all"],
+        help="Which eval files to plot. Use soft for natural policy behavior, hard for hard-constrained evaluation."
+    )
     args = parser.parse_args()
 
     result_dir = args.result_dir
@@ -550,7 +644,7 @@ def main():
     ensure_dir(plot_dir)
 
     train_files = sorted_npz_files(result_dir, "train")
-    eval_files = sorted_npz_files(result_dir, "eval")
+    eval_files = sorted_npz_files(result_dir, "eval", eval_variant=args.eval_variant)
 
     print(f"Result dir: {result_dir}")
     print(f"Plot dir:   {plot_dir}")
@@ -558,6 +652,7 @@ def main():
     for f in train_files:
         print("  ", f)
     print(f"Eval files: {len(eval_files)}")
+    print(f"Eval variant: {args.eval_variant}")
     for f in eval_files:
         print("  ", f)
 
@@ -569,13 +664,30 @@ def main():
 
     if args.mode in ["all", "eval"]:
         if len(eval_files) > 0:
-            plot_eval_timeseries_all_lambdas(eval_files, plot_dir, smooth_window=args.smooth_window)
+            plot_eval_timeseries_all_lambdas(
+                eval_files,
+                plot_dir,
+                smooth_window=args.smooth_window,
+                eval_variant=args.eval_variant
+            )
+            plot_queue_timeseries_all_lambdas(
+                eval_files,
+                plot_dir,
+                prefix="eval",
+                smooth_window=args.smooth_window,
+                eval_variant=args.eval_variant
+            )
         else:
             print("[Warning] No eval npz files found.")
-
+    
     if args.mode in ["all", "summary"]:
         if len(eval_files) > 0:
-            plot_eval_summary_vs_lambda(eval_files, plot_dir, last_window=args.last_window)
+            plot_eval_summary_vs_lambda(
+                eval_files,
+                plot_dir,
+                last_window=args.last_window,
+                eval_variant=args.eval_variant
+            )
         else:
             print("[Warning] No eval npz files found.")
 

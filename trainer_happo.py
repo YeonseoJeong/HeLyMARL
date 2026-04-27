@@ -421,6 +421,13 @@ class HAPPOTrainer:
         global_reward_hist = []
         ue_per_user_reward_hist = []
 
+        handover_count_history = []
+        handover_ratio_history = []
+        Q_mean_history = []
+        Z_mean_history = []
+        G_mean_history = []
+        G_max_history = []
+        
         # loss histories, recorded per PPO update
         update_step_history = []
         critic_loss_history = []
@@ -441,6 +448,20 @@ class HAPPOTrainer:
                 bs_actions=bs_actions,
                 cand_lists=cand_lists
             )
+
+            ho_count = float(info["total_HO_count"])
+            ho_ratio = ho_count / max(1, self.env.n_agents)
+            handover_count_history.append(ho_count)
+            handover_ratio_history.append(ho_ratio)
+
+            Q_vals = list(info["Q_u"].values())
+            Z_vals = list(info["Z_b"].values())
+            G_vals = list(info["G_u"].values())
+
+            Q_mean_history.append(np.mean(Q_vals))
+            Z_mean_history.append(np.mean(Z_vals))
+            G_mean_history.append(np.mean(G_vals))
+            G_max_history.append(np.max(G_vals))
 
             with torch.no_grad():
                 next_global_t = torch.as_tensor(next_global_obs, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -505,6 +526,11 @@ class HAPPOTrainer:
                 recent_fair = float(fairness_history[-1])
                 global_rew_100 = float(np.mean(global_reward_hist[-100:]))
 
+                ho_count_100 = float(np.mean(handover_count_history[-100:]))
+                ho_ratio_100 = float(np.mean(handover_ratio_history[-100:]))
+                G_mean_now = float(G_mean_history[-1])
+                G_max_now = float(G_max_history[-1])
+
                 on_parts = []
                 for bs in self.env.base_stations:
                     hist = list(self.env.bs_on_hist[bs.bs_id])
@@ -515,6 +541,8 @@ class HAPPOTrainer:
                 print(
                     f"Step {step+1:5d} | Thr:{recent_thr:.3f} | Fair:{recent_fair:.3f} | "
                     f"ON(100): {on_str} | "
+                    f"HO(100): count={ho_count_100:.3f} ratio={ho_ratio_100:.4f}/{self.env.kappa:.4f} | "
+                    f"Gmean:{G_mean_now:.3f} Gmax:{G_max_now:.3f} | "
                     f"GlobalRew(100):{global_rew_100:.3f}"
                 )
 
@@ -527,6 +555,12 @@ class HAPPOTrainer:
 
             "global_reward": global_reward_hist,
             "ue_per_user_reward": ue_per_user_reward_hist,
+            "handover_count_history": handover_count_history,
+            "handover_ratio_history": handover_ratio_history,
+
+            "Q_mean_history": Q_mean_history,
+            "Z_mean_history": Z_mean_history,
+            "G_mean_history": G_mean_history,
 
             # loss curves
             "update_step_history": update_step_history,
