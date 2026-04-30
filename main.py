@@ -1,13 +1,13 @@
 import os
 import numpy as np
 
-from basestation import SmallCellBaseStation
-from user_equipment import UserEquipment
-from core import generate_triangle_coverage
+from env.basestation import SmallCellBaseStation
+from env.user_equipment import UserEquipment
+from env.core import generate_triangle_coverage
 
-from utils_happo import set_seed
-from env_happo import HAPPOEnvironment
-from trainer_happo import HAPPOTrainer
+from lymarl_extension.utils_happo import set_seed
+from lymarl_extension.env_happo import HAPPOEnvironment
+from lymarl_extension.trainer_happo import HAPPOTrainer
 
 
 def make_env(seed, lambda_E, use_hard_constraint):
@@ -40,7 +40,7 @@ def make_env(seed, lambda_E, use_hard_constraint):
         beta_z=1.0,
         use_hard_constraint=use_hard_constraint,   # training: no hard constraint
         lambda_E=lambda_E,
-        kappa=0.1
+        kappa=0.01
     )
     return env
 
@@ -62,29 +62,32 @@ def make_trainer(env):
 
 if __name__ == "__main__":
     seed = 0
-    lambda_list = [0.1, 1.0]
+    lambda_list = [5.0, 10.0, 15.0, 20.0]
 
     os.makedirs("results_lambda", exist_ok=True)
 
     for lam in lambda_list:
-        # print(f"\n=== Training with lambda_E = {lam} ===")
+        print(f"\n=== Training with lambda_E = {lam} ===")
         # env = make_env(seed, lam)
         # trainer = make_trainer(env)
+        env_soft = make_env(seed, lam, use_hard_constraint=False)
+        trainer_soft = make_trainer(env_soft)
         
-        # # --------------------------------------------------
-        # # Train
-        # # --------------------------------------------------
-        # train_steps = 50000
-        # train_npz_path = f"results_lambda/LyMARL_train_rewards_lambda_{lam}.npz"
-        # model_path = f"results_lambda/LyMARL_model_lambda_{lam}.pt"
+        
+        # --------------------------------------------------
+        # Train
+        # --------------------------------------------------
+        train_steps = 50000
+        train_npz_path = f"results_lambda/LyMARL_train_rewards_lambda_{lam}.npz"
+        model_path = f"results_lambda/LyMARL_model_lambda_{lam}.pt"
 
-        # trainer.train(
-        #     n_steps=train_steps,
-        #     update_interval=128,
-        #     save_npz_path=train_npz_path
-        # )
+        trainer_soft.train(
+            n_steps=train_steps,
+            update_interval=128,
+            save_npz_path=train_npz_path
+        )
 
-        # trainer.save_model(model_path)
+        trainer_soft.save_model(model_path)
     
         print(f"\n=== Eval only with lambda_E = {lam} ===")
         model_path = f"results_lambda/LyMARL_model_lambda_{lam}.pt"
@@ -95,10 +98,7 @@ if __name__ == "__main__":
         # --------------------------------------------------
         # hard constraint OFF eval
         # --------------------------------------------------
-        env_soft = make_env(seed, lam, use_hard_constraint=False)
-        trainer_soft = make_trainer(env_soft)
         trainer_soft.load_model(model_path)
-
         soft_eval_npz_path = f"results_lambda/LyMARL_eval_soft_lambda_{lam}.npz"
         trainer_soft.evaluate(
             n_steps=50000,
@@ -108,14 +108,14 @@ if __name__ == "__main__":
         # --------------------------------------------------
         # hard constraint ON eval
         # --------------------------------------------------
-        env_hard = make_env(seed, lam, use_hard_constraint=True)
-        trainer_hard = make_trainer(env_hard)
-        trainer_hard.load_model(model_path)
+        # env_hard = make_env(seed, lam, use_hard_constraint=True)
+        # trainer_hard = make_trainer(env_hard)
+        # trainer_hard.load_model(model_path)
         
-        hard_eval_npz_path = f"results_lambda/LyMARL_eval_hard_lambda_{lam}.npz"
-        trainer_hard.evaluate(
-            n_steps=50000, 
-            save_npz_path=hard_eval_npz_path
-        )
+        # hard_eval_npz_path = f"results_lambda/LyMARL_eval_hard_lambda_{lam}.npz"
+        # trainer_hard.evaluate(
+        #     n_steps=50000, 
+        #     save_npz_path=hard_eval_npz_path
+        # )
 
     print("\n✅ Completed!\n")

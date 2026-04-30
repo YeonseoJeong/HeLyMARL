@@ -3,9 +3,9 @@ import matplotlib.pyplot as plt
 from typing import List
 from collections import defaultdict
 
-from basestation import BaseStation, SmallCellBaseStation
-from user_equipment import UserEquipment
-from core import generate_triangle_coverage
+from env.basestation import BaseStation, SmallCellBaseStation
+from env.user_equipment import UserEquipment
+from env.core import generate_triangle_coverage, generate_five_bs_coverage
 
 ################################################
 ## BASELINE DDPP ALGORITHM IMPLEMENTATION
@@ -53,7 +53,7 @@ class DDPPAlgorithm:
         self.prev_power = {bs.bs_id: 0.0 for bs in self.base_stations}
 
         self.P_max = {
-            bs.bs_id: 10 ** (bs.tx_power_dbm / 10) / 1000  # [W] # 20 dBm -> 0.1 W
+            bs.bs_id: 10 ** ((bs.tx_power_dbm - 30) / 10)  # dBm -> W
             for bs in self.base_stations
         }
 
@@ -222,39 +222,34 @@ class DDPPAlgorithm:
         return min(self.gamma_max[u_id], self.V / max(Q_u, 1e-6))  # 상한 gamma_max
 
     def user_association(self, t: int) -> dict:
-        """Score = Q_u × R_tilde - (Z_b + lambda_E) × P_max - G_u × h_candidate"""
         associations = {}
 
         for user in self.users:
+            ue_id = user.ue_id
             best_bs = None
-            best_score = -np.inf
+            best_w = -np.inf
 
             for bs in self.base_stations:
-                # 결정 단계는 prev_power 기반 간섭 -> R_tilde 
-                R_tilde = self.calculate_achievable_rate(user.ue_id, bs.bs_id)
-                power = self.P_max[bs.bs_id]
-                h_candidate = self.compute_handover_indicator(user.ue_id, bs.bs_id)
+                bs_id = bs.bs_id
 
-                score = (
-                    self.Q_u[user.ue_id] * R_tilde 
-                    - (self.Z_b[bs.bs_id] + self.lambda_E) * power
-                    - self.G_u[user.ue_id] * h_candidate
-                )
+                R_tilde = self.calculate_achievable_rate(ue_id, bs_id)
+                h_candidate = self.compute_handover_indicator(ue_id, bs_id)
 
-                if score > best_score:
-                    best_score = score
-                    best_bs = bs.bs_id
+                QR = self.Q_u[ue_id] * R_tilde
+                ZP = self.Z_b[bs_id] * self.P_max[bs_id]
+                GH = self.G_u[ue_id] * h_candidate
 
-            associations[user.ue_id] = best_bs if best_score > 0 else None
+                w = QR - ZP - GH
+
+                if w > best_w:
+                    best_w = w
+                    best_bs = bs_id
+
+            associations[ue_id] = best_bs
 
         return associations
-
+    
     def bs_scheduling(self, associations: dict) -> tuple:
-        """
-        R = Q_u × R_tilde - G_u × h_candidate
-        threshold = (Z_b + lambda_E) × P_max
-        if R > threshold => ON and serve best UE
-        """
         bs_status = {}
         scheduled_users = {}
 
@@ -264,40 +259,38 @@ class DDPPAlgorithm:
                 proposers[bs_id].append(ue_id)
 
         for bs in self.base_stations:
-            if not proposers[bs.bs_id]:
-                bs_status[bs.bs_id] = 0
-                scheduled_users[bs.bs_id] = None
+            bs_id = bs.bs_id
+
+            if not proposers[bs_id]:
+                bs_status[bs_id] = 0
+                scheduled_users[bs_id] = None
                 continue
 
-            best_score_qr = 0.0
             best_ue = None
+            best_s = -np.inf
 
-            for ue_id in proposers[bs.bs_id]:
-                # 결정 단계는 prev_power 기반 간섭 -> R_tilde 
-                R_tilde = self.calculate_achievable_rate(ue_id, bs.bs_id)
-                h_candidate = self.compute_handover_indicator(ue_id, bs.bs_id)
+            for ue_id in proposers[bs_id]:
+                R_tilde = self.calculate_achievable_rate(ue_id, bs_id)
+                h_candidate = self.compute_handover_indicator(ue_id, bs_id)
 
-                score_qr = (
-                    self.Q_u[ue_id] * R_tilde
-                    - self.G_u[ue_id] * h_candidate
-                )
+                QR = self.Q_u[ue_id] * R_tilde
+                ZP = self.Z_b[bs_id] * self.P_max[bs_id]
+                GH = self.G_u[ue_id] * h_candidate
 
-                if score_qr > best_score_qr:
-                    best_score_qr = score_qr
+                s = QR - ZP - GH
+
+                if s > best_s:
+                    best_s = s
                     best_ue = ue_id
 
-            power = self.P_max[bs.bs_id]
-            threshold = (self.Z_b[bs.bs_id] + self.lambda_E) * power
-
-            if best_score_qr > threshold:
-                bs_status[bs.bs_id] = 1
-                scheduled_users[bs.bs_id] = best_ue
+            if best_s >= self.lambda_E * self.P_max[bs_id]:
+                bs_status[bs_id] = 1
+                scheduled_users[bs_id] = best_ue
             else:
-                bs_status[bs.bs_id] = 0
-                scheduled_users[bs.bs_id] = None
+                bs_status[bs_id] = 0
+                scheduled_users[bs_id] = None
 
         return bs_status, scheduled_users
-
 
     def update_queues(self, scheduled_users: dict, bs_status: dict) -> dict:
         """Queue updates + returns actual served rates R(SINR)"""
@@ -457,13 +450,18 @@ class DDPPAlgorithm:
                 ratio_str = ', '.join([f'BS{b}:{r:.2f}' for b, r in on_ratios.items()])
                 ho_count_100 = float(np.mean(self.handover_count_history[-100:]))
                 ho_ratio_100 = float(np.mean(self.handover_ratio_history[-100:]))
-                G_mean_now = float(self.G_mean_history[-1]) if len(self.G_mean_history) > 0 else 0.0
+
+                Q_vals = np.array(list(self.Q_u.values()), dtype=float)
+                Z_vals = np.array(list(self.Z_b.values()), dtype=float)
+                G_vals = np.array(list(self.G_u.values()), dtype=float)
 
                 fair_str = "nan" if np.isnan(recent_fair) else f"{recent_fair:.3f}"
                 print(f"Slot {t+1:4d} | Thr: {recent_thr:.3f} Gbps | "
                     f"Fair(JFI@100): {fair_str} | ON: [{ratio_str}] | "
                     f"HO(100): count={ho_count_100:.3f} ratio={ho_ratio_100:.4f}/{self.kappa:.4f} | "
-                    f"Gmean:{G_mean_now:.3f}")
+                    f"Q mean/max: {np.mean(Q_vals):5.3f}/{np.max(Q_vals):5.3f} | "
+                    f"Z mean/max: {np.mean(Z_vals):5.3f}/{np.max(Z_vals):5.3f} | "
+                    f"G mean/max: {np.mean(G_vals):5.3f}/{np.max(G_vals):5.3f}")
         
         print(f"\n{'='*60}")
         overall_thr = float(np.mean(self.throughput_history))
@@ -650,7 +648,8 @@ class DDPPAlgorithm:
 
         throughput = np.asarray(self.throughput_history, dtype=np.float32)
         fairness = np.asarray(self.fairness_history, dtype=np.float32)
-        handover_ratio = np.asarray(self.handover_ratio_history, dtype=np.float32)
+        handover_ratio_all = np.asarray(self.handover_ratio_history, dtype=np.float32)
+        handover_count_all = np.asarray(self.handover_count_history, dtype=np.float32)
 
         bs_ids = sorted([bs.bs_id for bs in self.base_stations])
 
@@ -663,9 +662,18 @@ class DDPPAlgorithm:
             bs_on_mat = (power_mat > 0.0).astype(np.float32)
             bs_on_ratio_per_bs = bs_on_mat.mean(axis=1)
             bs_on_ratio_mean = np.asarray([float(bs_on_ratio_per_bs.mean())], dtype=np.float32)
+            bs_on_any = np.any(bs_on_mat > 0.0, axis=0)
+            if np.any(bs_on_any):
+                handover_ratio = handover_ratio_all[bs_on_any]
+                handover_count = handover_count_all[bs_on_any]
+            else:
+                handover_ratio = np.asarray([], dtype=np.float32)
+                handover_count = np.asarray([], dtype=np.float32)
         else:
             bs_on_ratio_per_bs = np.asarray([], dtype=np.float32)
             bs_on_ratio_mean = np.asarray([np.nan], dtype=np.float32)
+            handover_ratio = np.asarray([], dtype=np.float32)
+            handover_count = np.asarray([], dtype=np.float32)
 
         # Queue mean trajectories
         T = len(throughput)
@@ -685,6 +693,32 @@ class DDPPAlgorithm:
         Q_mean = np.asarray(Q_mean, dtype=np.float32)
         Z_mean = np.asarray(Z_mean, dtype=np.float32)
         G_mean = np.asarray(G_mean, dtype=np.float32)
+        slot_rates = np.asarray(self.slot_rates, dtype=np.float32)
+        eps = 1e-12
+
+        if slot_rates.ndim == 2 and slot_rates.shape[0] > 0:
+            avg_user_rates = np.mean(slot_rates, axis=0)
+            pf_utility = float(np.sum(np.log(avg_user_rates + eps)))
+        else:
+            avg_user_rates = np.asarray([], dtype=np.float32)
+            pf_utility = np.nan
+
+        if power_mat.size > 0:
+            energy_per_slot = np.sum(power_mat, axis=0)
+            avg_energy_cost = float(np.mean(energy_per_slot))
+        else:
+            energy_per_slot = np.asarray([], dtype=np.float32)
+            avg_energy_cost = np.nan
+
+        ea_pf_utility = float(pf_utility - self.lambda_E * avg_energy_cost)
+        if np.isnan(pf_utility) or np.isnan(avg_energy_cost):
+            ea_pf_utility = np.nan
+
+        pf_utility = np.asarray([pf_utility], dtype=np.float32)
+        avg_energy_cost = np.asarray([avg_energy_cost], dtype=np.float32)
+        ea_pf_utility = np.asarray([ea_pf_utility], dtype=np.float32)
+        avg_user_rates = np.asarray(avg_user_rates, dtype=np.float32)
+        energy_per_slot = np.asarray(energy_per_slot, dtype=np.float32)
 
         np.savez_compressed(
             npz_path,
@@ -701,7 +735,7 @@ class DDPPAlgorithm:
             bs_on_ratio_mean=bs_on_ratio_mean,
 
             handover_ratio=handover_ratio,
-            handover_count=np.asarray(self.handover_count_history, dtype=np.float32),
+            handover_count=handover_count,
             handover_budget_ratio=np.asarray([float(self.kappa)], dtype=np.float32),
             energy_budget_ratio=np.asarray([float(self.power_budget_ratio)], dtype=np.float32),
             lambda_E=np.asarray([float(self.lambda_E)], dtype=np.float32),
@@ -709,6 +743,14 @@ class DDPPAlgorithm:
             Q_mean=Q_mean,
             Z_mean=Z_mean,
             G_mean=G_mean,
+
+            slot_rates=slot_rates,
+            avg_user_rates=avg_user_rates,
+            energy_per_slot=energy_per_slot,
+            pf_utility=pf_utility,
+            avg_energy_cost=avg_energy_cost,
+            ea_pf_utility=ea_pf_utility,
+            performance_metric=ea_pf_utility,
         )
 
         print(f"✅ Saved DDPP results npz: {npz_path}")
@@ -716,9 +758,10 @@ class DDPPAlgorithm:
 if __name__ == "__main__":
     area_size = 100
     num_users = 20
-    lambda_E = 30.0
+    lambda_E = 5.0
 
     sbs_positions = generate_triangle_coverage(area_size, 35)
+    # sbs_positions = generate_five_bs_coverage(area_size, 35)
     sbs_list = [SmallCellBaseStation(i + 1, pos, 10, 35) for i, pos in enumerate(sbs_positions)]
     users = [UserEquipment(i + 1, (np.random.uniform(10, 90), np.random.uniform(10, 90)))
              for i in range(num_users)]

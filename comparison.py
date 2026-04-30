@@ -15,6 +15,68 @@ def safe_get(data, key, default=None):
         return data[key]
     return default
 
+def compute_objective_metric(data, power_mat, lambda_E, last_window=10000):
+    """
+    Compute Eq. (11)-style objective:
+    sum_u log(avg_t R_u(t)) - lambda_E * avg_t sum_b e_b y_b(t)
+
+    Requires either:
+    - ea_pf_utility already saved, or
+    - avg_user_rates, or
+    - slot_rates
+    """
+    eps = 1e-12
+
+    # 1) If already saved, use it directly
+    saved_obj = safe_get(data, "ea_pf_utility", None)
+    if saved_obj is not None:
+        saved_obj = np.asarray(saved_obj).reshape(-1)
+        if saved_obj.size > 0:
+            return float(saved_obj[0])
+
+    saved_obj = safe_get(data, "performance_metric", None)
+    if saved_obj is not None:
+        saved_obj = np.asarray(saved_obj).reshape(-1)
+        if saved_obj.size > 0:
+            return float(saved_obj[0])
+
+    # 2) Compute PF utility from avg_user_rates if available
+    avg_user_rates = safe_get(data, "avg_user_rates", None)
+
+    if avg_user_rates is not None:
+        avg_user_rates = np.asarray(avg_user_rates, dtype=np.float32).reshape(-1)
+        if avg_user_rates.size > 0:
+            pf_utility = float(np.sum(np.log(avg_user_rates + eps)))
+        else:
+            pf_utility = np.nan
+    else:
+        # 3) Otherwise compute from slot_rates if available
+        slot_rates = safe_get(data, "slot_rates", None)
+
+        if slot_rates is not None:
+            slot_rates = np.asarray(slot_rates, dtype=np.float32)
+
+            if slot_rates.ndim == 2 and slot_rates.shape[0] > 0:
+                recent_rates = slot_rates[-last_window:]
+                avg_user_rates = np.mean(recent_rates, axis=0)
+                pf_utility = float(np.sum(np.log(avg_user_rates + eps)))
+            else:
+                pf_utility = np.nan
+        else:
+            pf_utility = np.nan
+
+    # 4) Energy cost
+    if power_mat is not None and power_mat.size > 0:
+        recent_power = power_mat[:, -last_window:]
+        energy_per_slot = np.sum(recent_power, axis=0)
+        avg_energy_cost = float(np.mean(energy_per_slot))
+    else:
+        avg_energy_cost = np.nan
+
+    if np.isnan(pf_utility) or np.isnan(avg_energy_cost):
+        return np.nan
+
+    return float(pf_utility - lambda_E * avg_energy_cost)
 
 def parse_lambda(path):
     name = os.path.basename(path)
@@ -26,11 +88,14 @@ def parse_lambda(path):
 def infer_method(path):
     name = os.path.basename(path).lower()
 
+    if "maxsnr" in name or "max-snr" in name or "max_snr" in name:
+        return "Max-SNR"
+
     if "ddpp" in name:
         return "DDPP"
 
     if "soft" in name:
-        return "LyMARL-Soft"
+        return "LyMARL"
 
     if "hard" in name:
         return "LyMARL-Hard"
@@ -54,6 +119,11 @@ def summarize_npz(path, last_window=10000):
     fairness = safe_get(data, "fairness", np.array([]))
     handover_ratio = safe_get(data, "handover_ratio", np.array([]))
     power_mat = safe_get(data, "power_mat", np.zeros((0, 0), dtype=np.float32))
+    lambda_arr = safe_get(data, "lambda_E", np.array([np.nan]))
+    if isinstance(lambda_arr, np.ndarray):
+        lambda_val = float(lambda_arr.reshape(-1)[0]) if lambda_arr.size > 0 else np.nan
+    else:
+        lambda_val = float(lambda_arr)
 
     if throughput.size > 0:
         throughput_mean = float(np.mean(throughput[-last_window:]))
@@ -76,6 +146,13 @@ def summarize_npz(path, last_window=10000):
     else:
         bs_on_ratio_mean = safe_get(data, "bs_on_ratio_mean", np.array([np.nan]))
         on_ratio_mean = float(bs_on_ratio_mean[0]) if len(bs_on_ratio_mean) > 0 else np.nan
+    
+    objective = compute_objective_metric(
+        data=data,
+        power_mat=power_mat,
+        lambda_E=lambda_val,
+        last_window=last_window
+    )
 
     return {
         "tag": tag,
@@ -83,6 +160,7 @@ def summarize_npz(path, last_window=10000):
         "fairness": fairness_mean,
         "on_ratio": on_ratio_mean,
         "handover_ratio": handover_mean,
+        "objective": objective
     }
 
 
@@ -119,11 +197,11 @@ def plot_grouped_bar_by_lambda(
 ):
     grouped = {}
 
-    methods = ["DDPP", "LyMARL-Hard", "LyMARL-Soft"]
+    methods = ["Max-SNR", "DDPP", "LyMARL"]
     colors = {
-        "DDPP": "tab:orange",
-        "LyMARL-Hard": "tab:blue",
-        "LyMARL-Soft": "tab:green",
+        "LyMARL": "blue",
+        "DDPP": "green",
+        "Max-SNR": "red",
     }
 
     for s in summaries:
@@ -143,31 +221,24 @@ def plot_grouped_bar_by_lambda(
 
     lambdas = sorted(grouped.keys())
 
-    x = np.arange(len(lambdas))
-    width = 0.25
-
     plt.figure(figsize=(10, 5))
-
-    offsets = {
-        "DDPP": -width,
-        "LyMARL-Hard": 0.0,
-        "LyMARL-Soft": width,
-    }
 
     for method in methods:
         vals = [grouped[lam].get(method, np.nan) for lam in lambdas]
-        plt.bar(
-            x + offsets[method],
+        plt.plot(
+            lambdas,
             vals,
-            width,
+            marker='o',
+            linewidth=2,
             label=method,
             color=colors[method],
         )
 
-    plt.xticks(x, [f"λ={lam:g}" for lam in lambdas], rotation=0)
+    plt.xticks(lambdas, [f"λ={lam:g}" for lam in lambdas])
+    plt.xlabel("lambda_E")
     plt.ylabel(ylabel)
     plt.title(title)
-    plt.grid(True, axis="y", alpha=0.3)
+    plt.grid(True, alpha=0.3)
 
     if hline is not None:
         plt.axhline(
@@ -184,6 +255,14 @@ def plot_grouped_bar_by_lambda(
     plt.close()
 
 def plot_metric_comparison(summaries, plot_dir):
+    plot_grouped_bar_by_lambda(
+        summaries,
+        metric_key="objective",
+        ylabel="Objective Value",
+        title="Eq. (11) Objective Comparison by λ",
+        save_path=os.path.join(plot_dir, "compare_objective_grouped.png")
+    )
+
     plot_grouped_bar_by_lambda(
         summaries,
         metric_key="throughput",
@@ -222,7 +301,7 @@ def plot_metric_comparison(summaries, plot_dir):
 
 
 def print_summary_table(summaries):
-    method_order = ["DDPP", "LyMARL-Hard", "LyMARL-Soft"]
+    method_order = ["Max-SNR", "DDPP", "LyMARL"]
 
     grouped = {}
     for s in summaries:
@@ -246,6 +325,7 @@ def print_summary_table(summaries):
         print("-" * 92)
         print(
             f"{'Method':<18} | "
+            f"{'Objective':>12} | "
             f"{'Throughput':>12} | "
             f"{'Fairness':>10} | "
             f"{'ON Ratio':>10} | "
@@ -261,6 +341,7 @@ def print_summary_table(summaries):
 
             print(
                 f"{method:<18} | "
+                f"{s['objective']:>12.4f} | "
                 f"{s['throughput']:>12.4f} | "
                 f"{s['fairness']:>10.4f} | "
                 f"{s['on_ratio']:>10.4f} | "
@@ -272,6 +353,7 @@ def print_summary_table(summaries):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--maxsnr_npz", type=str, default="results_compare/MaxSNR_eval_lambda_*.npz")
     parser.add_argument("--ddpp_npz", type=str, default="results_compare/DDPP_eval_lambda_*.npz")
     parser.add_argument("--happo_dir", type=str, default="results_lambda")
     parser.add_argument("--plot_dir", type=str, default="results_compare/plots")
@@ -292,6 +374,18 @@ def main():
         files.extend(ddpp_files)
     else:
         print(f"[Warning] DDPP npz not found: {args.ddpp_npz}")
+
+
+    maxsnr_files = glob.glob(args.maxsnr_npz)
+    maxsnr_files = sorted(
+        maxsnr_files,
+        key=lambda p: parse_lambda(p) if parse_lambda(p) is not None else 1e9
+    )
+    if len(maxsnr_files) > 0:
+        files.extend(maxsnr_files)
+    else:
+        print(f"[Warning] Max-SNR npz not found: {args.maxsnr_npz}")
+    
 
     happo_files = glob.glob(os.path.join(args.happo_dir, "**", "*eval*lambda_*.npz"), recursive=True)
 
@@ -317,6 +411,9 @@ def main():
 
         lam = parse_lambda(f)
         method = infer_method(f)
+
+        if method == "LyMARL-Hard":
+            continue
 
         s["lambda"] = lam
         s["method"] = method

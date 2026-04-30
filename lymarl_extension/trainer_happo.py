@@ -8,13 +8,13 @@ from torch.distributions import Categorical
 from collections import defaultdict
 from typing import Dict, Optional
 
-from networks_happo import (
+from lymarl_extension.networks_happo import (
     UEActorNetwork,
     BSActorNetwork,
     CentralizedCritic,
     ValueNorm
 )
-from utils_happo import moving_avg, block_avg_1d
+from lymarl_extension.utils_happo import moving_avg, block_avg_1d
 
 
 class HAPPOTrainer:
@@ -730,6 +730,7 @@ class HAPPOTrainer:
 
         thr = np.asarray(results.get("throughput_history", []), dtype=np.float32)
         fair = np.asarray(results.get("fairness_history", []), dtype=np.float32)
+        slot_rates = np.asarray(results.get("slot_rates", []), dtype=np.float32)
 
         global_reward = np.asarray(results.get("global_reward", []), dtype=np.float32)
         ue_per_user = np.asarray(results.get("ue_per_user_reward", []), dtype=np.float32)
@@ -829,6 +830,42 @@ class HAPPOTrainer:
             handover_violation_mean = np.asarray([], dtype=np.float32)
             handover_violation_flag = np.asarray([], dtype=np.float32)
 
+        # --------------------------------------------------
+        # Eq. (11) Objective / EA-PF Utility
+        # J = sum_u log(avg_t R_u(t)) - lambda_E * avg_t sum_b e_b y_b(t)
+        # --------------------------------------------------
+        eps = 1e-12
+        obj_window = min(10000, len(thr))
+
+        if slot_rates.ndim == 2 and slot_rates.shape[0] > 0:
+            recent_slot_rates = slot_rates[-obj_window:]
+            avg_user_rates = np.mean(recent_slot_rates, axis=0)
+            pf_utility_value = float(np.sum(np.log(avg_user_rates + eps)))
+        else:
+            avg_user_rates = np.asarray([], dtype=np.float32)
+            pf_utility_value = np.nan
+
+        if power_mat.size > 0:
+            recent_power_mat = power_mat[:, -obj_window:]
+            energy_per_slot = np.sum(recent_power_mat, axis=0)
+            avg_energy_cost_value = float(np.mean(energy_per_slot))
+        else:
+            energy_per_slot = np.asarray([], dtype=np.float32)
+            avg_energy_cost_value = np.nan
+
+        lambda_E_value = float(getattr(self.env, "lambda_E", 0.0))
+
+        if np.isnan(pf_utility_value) or np.isnan(avg_energy_cost_value):
+            ea_pf_utility_value = np.nan
+        else:
+            ea_pf_utility_value = pf_utility_value - lambda_E_value * avg_energy_cost_value
+
+        avg_user_rates = np.asarray(avg_user_rates, dtype=np.float32)
+        energy_per_slot = np.asarray(energy_per_slot, dtype=np.float32)
+        pf_utility = np.asarray([pf_utility_value], dtype=np.float32)
+        avg_energy_cost = np.asarray([avg_energy_cost_value], dtype=np.float32)
+        ea_pf_utility = np.asarray([ea_pf_utility_value], dtype=np.float32)
+
         np.savez_compressed(
             npz_path,
             tag=str(tag),
@@ -869,6 +906,16 @@ class HAPPOTrainer:
             handover_budget_ratio=handover_budget_ratio,
             handover_violation_mean=handover_violation_mean,
             handover_violation_flag=handover_violation_flag,
+
+            # Eq. (11) objective
+            lambda_E=np.asarray([lambda_E_value], dtype=np.float32),
+            slot_rates=slot_rates,
+            avg_user_rates=avg_user_rates,
+            energy_per_slot=energy_per_slot,
+            pf_utility=pf_utility,
+            avg_energy_cost=avg_energy_cost,
+            ea_pf_utility=ea_pf_utility,
+            performance_metric=ea_pf_utility,
 
             # optional QoE
             served_ratio=served_ratio,

@@ -37,6 +37,19 @@ def generate_triangle_coverage(area_size: float=100,
     ]
     return small_bs_positions
 
+def generate_five_bs_coverage(area_size=100, coverage_radius=35):
+    center_x, center_y = area_size / 2, area_size / 2
+    offset = coverage_radius * 0.9
+
+    small_bs_positions = [
+        (center_x - offset, center_y - offset),  # bottom left
+        (center_x + offset, center_y - offset),  # bottom right
+        (center_x - offset, center_y + offset),  # top left
+        (center_x + offset, center_y + offset),  # top right
+        (center_x, center_y),                    # center
+    ]
+    return small_bs_positions
+
 
 def plot_associations(sbs_list, ue_list, all_bs, 
                       associations, sumrate): 
