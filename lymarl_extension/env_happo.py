@@ -25,9 +25,6 @@ class HAPPOEnvironment:
         bs_top_k: int = 5,
         hard_window_len: int = 10000,
         bs_over_penalty: float = 50.0,
-        eta_q: float = 1.0,
-        alpha_rate: float = 3.0,
-        beta_z: float = 1.0,
         use_hard_constraint: bool = False,
         lambda_E: float = 1.0,
         kappa: float = 0.02
@@ -43,10 +40,6 @@ class HAPPOEnvironment:
         self.enable_channel_variation = bool(enable_channel_variation)
 
         self.bs_over_penalty = float(bs_over_penalty)
-        self.eta_q = float(eta_q)
-        self.alpha_rate = float(alpha_rate)
-        self.beta_z = float(beta_z)
-
         self.bs_top_k = int(bs_top_k)
         assert self.bs_top_k >= 1
 

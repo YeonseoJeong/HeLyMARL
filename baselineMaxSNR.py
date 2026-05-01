@@ -191,7 +191,7 @@ class MaxSNRBaseline:
         rate = self.calculate_achievable_rate(ue_id, bs_id)
         avg_rate = self.avg_rate_pf.get(ue_id, 1e-3)
 
-        return rate / (avg_rate + self.pf_eps)
+        return np.log(rate + self.pf_eps) - np.log(avg_rate + self.pf_eps)
     # =========================================================
     # Max-SNR decision
     # =========================================================
@@ -210,7 +210,7 @@ class MaxSNRBaseline:
 
             for bs in self.base_stations:
                 bs_id = bs.bs_id
-                rate = self.calculate_achievable_rate(ue_id, bs_id)
+                rate = self.compute_pf_score(ue_id, bs_id)
 
                 if rate > best_rate:
                     best_rate = rate
@@ -244,20 +244,14 @@ class MaxSNRBaseline:
             best_rate = -np.inf
 
             for ue_id in proposers[bs_id]:
-                rate = self.calculate_achievable_rate(ue_id, bs_id)
+                rate = self.compute_pf_score(ue_id, bs_id)
 
                 if rate > best_rate:
                     best_rate = rate
                     best_ue = ue_id
-
-            threshold = self.lambda_E * self.P_max[bs_id]
-
-            if best_rate >= threshold:
-                bs_status[bs_id] = 1
-                scheduled_users[bs_id] = best_ue
-            else:
-                bs_status[bs_id] = 0
-                scheduled_users[bs_id] = None
+            
+            bs_status[bs_id] = 1
+            scheduled_users[bs_id] = best_ue
 
         return bs_status, scheduled_users
 
@@ -559,11 +553,11 @@ class MaxSNRBaseline:
         # =========================================================
         slot_rates = np.asarray(self.slot_rates, dtype=np.float32)
         eps = 1e-12
-        obj_window = min(10000, len(throughput))
+        # obj_window = min(10000, len(throughput))
 
         if slot_rates.ndim == 2 and slot_rates.shape[0] > 0:
-            recent_slot_rates = slot_rates[-obj_window:]
-            avg_user_rates = np.mean(recent_slot_rates, axis=0)
+            # recent_slot_rates = slot_rates[-obj_window:]
+            avg_user_rates = np.mean(slot_rates, axis=0)
             pf_utility_value = float(np.sum(np.log(avg_user_rates + eps)))
         else:
             recent_slot_rates = np.asarray([], dtype=np.float32)
@@ -571,8 +565,8 @@ class MaxSNRBaseline:
             pf_utility_value = np.nan
 
         if power_mat.size > 0:
-            recent_power_mat = power_mat[:, -obj_window:]
-            energy_per_slot = np.sum(recent_power_mat, axis=0)
+            # recent_power_mat = power_mat[:, -obj_window:]
+            energy_per_slot = np.sum(power_mat, axis=0)
             avg_energy_cost_value = float(np.mean(energy_per_slot))
         else:
             energy_per_slot = np.asarray([], dtype=np.float32)
@@ -637,43 +631,96 @@ class MaxSNRBaseline:
 
         print(f"✅ Saved Max-SNR results npz: {npz_path}")
 
+def sample_users_near_bs_boundaries(
+    sbs_positions,
+    num_users,
+    area_size=100,
+    noise_std=5.0,
+    min_pos=10,
+    max_pos=90,
+):
+    """
+    Place users near pairwise BS boundary regions.
+    Boundary proxy = midpoint between two BSs.
+    """
+    sbs_positions = [np.asarray(p, dtype=np.float32) for p in sbs_positions]
+
+    bs_pairs = []
+    for i in range(len(sbs_positions)):
+        for j in range(i + 1, len(sbs_positions)):
+            bs_pairs.append((i, j))
+
+    user_positions = []
+
+    for _ in range(num_users):
+        i, j = bs_pairs[np.random.randint(len(bs_pairs))]
+
+        p_i = sbs_positions[i]
+        p_j = sbs_positions[j]
+
+        midpoint = 0.5 * (p_i + p_j)
+
+        pos = midpoint + np.random.normal(0.0, noise_std, size=2)
+        pos = np.clip(pos, min_pos, max_pos)
+
+        user_positions.append(tuple(pos))
+
+    return user_positions
+    
 
 if __name__ == "__main__":
     area_size = 100
     num_users = 20
-    lambda_E = 20.0
+    max_slots = 30000
+    lambda_list = [5.0, 10.0, 15.0, 20.0]
 
-    sbs_positions = generate_triangle_coverage(area_size, 35)
-    # sbs_positions = generate_five_bs_coverage(area_size, 35)
+    for lambda_E in lambda_list:
+        print(f"\n{'='*80}")
+        print(f" Running Max-SNR with lambda_E = {lambda_E}")
+        print(f"{'='*80}\n")
 
-    sbs_list = [
-        SmallCellBaseStation(i + 1, pos, 10, 35)
-        for i, pos in enumerate(sbs_positions)
-    ]
+        sbs_positions = generate_triangle_coverage(area_size, 35)
+        # sbs_positions = generate_five_bs_coverage(area_size, 35)
 
-    users = [
-        UserEquipment(
-            i + 1,
-            (np.random.uniform(10, 90), np.random.uniform(10, 90))
+        sbs_list = [
+            SmallCellBaseStation(i + 1, pos, 10, 35)
+            for i, pos in enumerate(sbs_positions)
+        ]
+
+        # boundary_user_positions = sample_users_near_bs_boundaries(
+        #     sbs_positions=sbs_positions,
+        #     num_users=num_users,
+        #     area_size=area_size,
+        #     noise_std=5.0,
+        #     min_pos=10,
+        #     max_pos=90,
+        # )
+
+        # users = [
+        #     UserEquipment(i + 1, boundary_user_positions[i])
+        #     for i in range(num_users)
+        # ]
+
+        users = [
+            UserEquipment(i + 1, (np.random.uniform(10, 90), np.random.uniform(10, 90)))
+            for i in range(num_users)
+        ]
+
+        maxsnr = MaxSNRBaseline(
+            sbs_list,
+            users,
+            power_budget_ratio=0.6,
+            max_slots=max_slots,
+            enable_mobility=True,
+            enable_channel_variation=True,
+            seed=0,
+            hard_window_len=10000, 
+            lambda_E=lambda_E,
+            kappa=0.05,
         )
-        for i in range(num_users)
-    ]
 
-    maxsnr = MaxSNRBaseline(
-        sbs_list,
-        users,
-        power_budget_ratio=0.6,
-        max_slots=50000,
-        enable_mobility=True,
-        enable_channel_variation=True,
-        seed=0,
-        hard_window_len=10000,
-        lambda_E=lambda_E,
-        kappa=0.1,
-    )
-
-    maxsnr.run_simulation()
-    maxsnr.save_results_npz(
-        f"results_compare/MaxSNR_eval_lambda_{lambda_E}.npz",
-        tag=f"MaxSNR_{lambda_E}"
-    )
+        maxsnr.run_simulation()
+        maxsnr.save_results_npz(
+            f"results_compare/MaxSNR_eval_lambda_{lambda_E}.npz",
+            tag=f"MaxSNR_{lambda_E}"
+        )

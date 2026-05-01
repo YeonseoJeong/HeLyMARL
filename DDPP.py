@@ -67,7 +67,7 @@ class DDPPAlgorithm:
         self.gamma_max = {ue.ue_id: 5.0 for ue in users}
 
         self.G_u = {ue.ue_id: 0.0 for ue in users}
-        self.kappa = 0.1
+        self.kappa = 0.05
 
         self.m_u = {ue.ue_id: None for ue in users}
 
@@ -90,7 +90,6 @@ class DDPPAlgorithm:
         self.user_rate_history = defaultdict(list)
         self.fairness_history = []
         self.slot_rates = []
-
         # ==========================================
         # Environment
         # ==========================================
@@ -461,8 +460,7 @@ class DDPPAlgorithm:
                     f"HO(100): count={ho_count_100:.3f} ratio={ho_ratio_100:.4f}/{self.kappa:.4f} | "
                     f"Q mean/max: {np.mean(Q_vals):5.3f}/{np.max(Q_vals):5.3f} | "
                     f"Z mean/max: {np.mean(Z_vals):5.3f}/{np.max(Z_vals):5.3f} | "
-                    f"G mean/max: {np.mean(G_vals):5.3f}/{np.max(G_vals):5.3f}")
-        
+                    f"G mean/max: {np.mean(G_vals):5.3f}/{np.max(G_vals):5.3f}")                  
         print(f"\n{'='*60}")
         overall_thr = float(np.mean(self.throughput_history))
         overall_fair = float(np.nanmean(self.recent_fair_list)) if len(self.recent_fair_list) > 0 else np.nan  # ep 전체 슬롯 기준 JFI
@@ -755,18 +753,79 @@ class DDPPAlgorithm:
 
         print(f"✅ Saved DDPP results npz: {npz_path}")
 
+def sample_users_near_bs_boundaries(
+    sbs_positions,
+    num_users,
+    area_size=100,
+    noise_std=5.0,
+    min_pos=10,
+    max_pos=90,
+):
+    """
+    Place users near pairwise BS boundary regions.
+    Boundary proxy = midpoint between two BSs.
+    """
+    sbs_positions = [np.asarray(p, dtype=np.float32) for p in sbs_positions]
+
+    bs_pairs = []
+    for i in range(len(sbs_positions)):
+        for j in range(i + 1, len(sbs_positions)):
+            bs_pairs.append((i, j))
+
+    user_positions = []
+
+    for _ in range(num_users):
+        i, j = bs_pairs[np.random.randint(len(bs_pairs))]
+
+        p_i = sbs_positions[i]
+        p_j = sbs_positions[j]
+
+        midpoint = 0.5 * (p_i + p_j)
+
+        pos = midpoint + np.random.normal(0.0, noise_std, size=2)
+        pos = np.clip(pos, min_pos, max_pos)
+
+        user_positions.append(tuple(pos))
+
+    return user_positions
+    
 if __name__ == "__main__":
     area_size = 100
     num_users = 20
-    lambda_E = 5.0
+    max_slots = 30000
+    lambda_list = [5.0, 10.0, 15.0, 20.0]
 
-    sbs_positions = generate_triangle_coverage(area_size, 35)
-    # sbs_positions = generate_five_bs_coverage(area_size, 35)
-    sbs_list = [SmallCellBaseStation(i + 1, pos, 10, 35) for i, pos in enumerate(sbs_positions)]
-    users = [UserEquipment(i + 1, (np.random.uniform(10, 90), np.random.uniform(10, 90)))
-             for i in range(num_users)]
+    for lambda_E in lambda_list:
+        print(f"\n{'='*80}")
+        print(f" Running DDPP with lambda_E = {lambda_E}")
+        print(f"{'='*80}\n")
 
-    dpp = DDPPAlgorithm(sbs_list, users, V=5.0, power_budget_ratio=0.6, max_slots=50000, use_hard_constraint=True, hard_window_len=10000, lambda_E=lambda_E)
-    dpp.run_simulation()
-    dpp.plot_results()
-    dpp.save_results_npz(f"results_compare/DDPP_eval_lambda_{lambda_E}.npz", tag=f"DDPP_{lambda_E}")
+        sbs_positions = generate_triangle_coverage(area_size, 35)
+        # sbs_positions = generate_five_bs_coverage(area_size, 35)
+        sbs_list = [SmallCellBaseStation(i + 1, pos, 10, 35) for i, pos in enumerate(sbs_positions)]
+        # boundary_user_positions = sample_users_near_bs_boundaries(
+        #     sbs_positions=sbs_positions,
+        #     num_users=num_users,
+        #     area_size=area_size,
+        #     noise_std=5.0,
+        #     min_pos=10,
+        #     max_pos=90,
+        # )
+        # users = [UserEquipment(i + 1, boundary_user_positions[i]) for i in range(num_users)]
+        users = [
+            UserEquipment(i + 1, (np.random.uniform(10, 90), np.random.uniform(10, 90)))
+            for i in range(num_users)
+        ]
+
+        dpp = DDPPAlgorithm(
+            sbs_list, users, 
+            V=5.0, 
+            power_budget_ratio=0.6, 
+            max_slots=max_slots, 
+            use_hard_constraint=True, 
+            hard_window_len=10000, 
+            lambda_E=lambda_E
+        )
+        dpp.run_simulation()
+        # dpp.plot_results()
+        dpp.save_results_npz(f"results_compare/DDPP_eval_lambda_{lambda_E}.npz", tag=f"DDPP_{lambda_E}")

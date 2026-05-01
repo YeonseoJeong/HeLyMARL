@@ -57,8 +57,8 @@ def compute_objective_metric(data, power_mat, lambda_E, last_window=10000):
             slot_rates = np.asarray(slot_rates, dtype=np.float32)
 
             if slot_rates.ndim == 2 and slot_rates.shape[0] > 0:
-                recent_rates = slot_rates[-last_window:]
-                avg_user_rates = np.mean(recent_rates, axis=0)
+                # recent_rates = slot_rates[-last_window:]
+                avg_user_rates = np.mean(slot_rates, axis=0)
                 pf_utility = float(np.sum(np.log(avg_user_rates + eps)))
             else:
                 pf_utility = np.nan
@@ -67,8 +67,8 @@ def compute_objective_metric(data, power_mat, lambda_E, last_window=10000):
 
     # 4) Energy cost
     if power_mat is not None and power_mat.size > 0:
-        recent_power = power_mat[:, -last_window:]
-        energy_per_slot = np.sum(recent_power, axis=0)
+        # recent_power = power_mat[:, -last_window:]
+        energy_per_slot = np.sum(power_mat, axis=0)
         avg_energy_cost = float(np.mean(energy_per_slot))
     else:
         avg_energy_cost = np.nan
@@ -90,7 +90,7 @@ def infer_method(path):
 
     if "maxsnr" in name or "max-snr" in name or "max_snr" in name:
         return "Max-SNR"
-
+    
     if "ddpp" in name:
         return "DDPP"
 
@@ -126,23 +126,23 @@ def summarize_npz(path, last_window=10000):
         lambda_val = float(lambda_arr)
 
     if throughput.size > 0:
-        throughput_mean = float(np.mean(throughput[-last_window:]))
+        throughput_mean = float(np.mean(throughput))
     else:
         throughput_mean = np.nan
 
     if fairness.size > 0:
-        fairness_mean = float(np.nanmean(fairness[-last_window:]))
+        fairness_mean = float(np.nanmean(fairness))
     else:
         fairness_mean = np.nan
 
     if handover_ratio.size > 0:
-        handover_mean = float(np.mean(handover_ratio[-last_window:]))
+        handover_mean = float(np.mean(handover_ratio))
     else:
         handover_mean = np.nan
 
     if power_mat.size > 0:
-        recent_power = power_mat[:, -last_window:]
-        on_ratio_mean = float(np.mean(recent_power > 0.0))
+        # recent_power = power_mat[:, -last_window:]
+        on_ratio_mean = float(np.mean(power_mat > 0.0))
     else:
         bs_on_ratio_mean = safe_get(data, "bs_on_ratio_mean", np.array([np.nan]))
         on_ratio_mean = float(bs_on_ratio_mean[0]) if len(bs_on_ratio_mean) > 0 else np.nan
@@ -197,11 +197,12 @@ def plot_grouped_bar_by_lambda(
 ):
     grouped = {}
 
-    methods = ["Max-SNR", "DDPP", "LyMARL"]
+    methods = ["Max-SNR", "DDPP", "LyMARL-Hard", "LyMARL"]
     colors = {
         "LyMARL": "blue",
         "DDPP": "green",
         "Max-SNR": "red",
+        "LyMARL-Hard": "orange",
     }
 
     for s in summaries:
@@ -301,7 +302,7 @@ def plot_metric_comparison(summaries, plot_dir):
 
 
 def print_summary_table(summaries):
-    method_order = ["Max-SNR", "DDPP", "LyMARL"]
+    method_order = ["Max-SNR", "DDPP", "LyMARL-Hard", "LyMARL"]
 
     grouped = {}
     for s in summaries:
@@ -366,6 +367,10 @@ def main():
     files = []
 
     ddpp_files = glob.glob(args.ddpp_npz)
+    ddpp_files = [
+        f for f in ddpp_files
+        if "_bs_" not in os.path.basename(f)
+    ]
     ddpp_files = sorted(
         ddpp_files,
         key=lambda p: parse_lambda(p) if parse_lambda(p) is not None else 1e9
@@ -377,6 +382,10 @@ def main():
 
 
     maxsnr_files = glob.glob(args.maxsnr_npz)
+    maxsnr_files = [
+        f for f in maxsnr_files
+        if "_bs_" not in os.path.basename(f)
+    ]
     maxsnr_files = sorted(
         maxsnr_files,
         key=lambda p: parse_lambda(p) if parse_lambda(p) is not None else 1e9
@@ -386,9 +395,14 @@ def main():
     else:
         print(f"[Warning] Max-SNR npz not found: {args.maxsnr_npz}")
     
+    happo_files = []
 
-    happo_files = glob.glob(os.path.join(args.happo_dir, "**", "*eval*lambda_*.npz"), recursive=True)
-
+    happo_files.extend(glob.glob(os.path.join(args.happo_dir, "LyMARL_eval_soft_lambda_*.npz")))
+    happo_files.extend(glob.glob(os.path.join(args.happo_dir, "LyMARL_eval_hard_lambda_*.npz")))
+    happo_files = [
+        f for f in happo_files
+        if "_bs_" not in os.path.basename(f)
+    ]
     if args.happo_lambda is not None:
         selected = []
         for f in happo_files:
@@ -398,7 +412,7 @@ def main():
         happo_files = selected
 
     happo_files = sorted(happo_files, key=lambda p: parse_lambda(p) if parse_lambda(p) is not None else 1e9)
-
+    
     files.extend(happo_files)
 
     if len(files) == 0:
@@ -411,9 +425,6 @@ def main():
 
         lam = parse_lambda(f)
         method = infer_method(f)
-
-        if method == "LyMARL-Hard":
-            continue
 
         s["lambda"] = lam
         s["method"] = method

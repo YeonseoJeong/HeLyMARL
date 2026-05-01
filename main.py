@@ -3,18 +3,18 @@ import numpy as np
 
 from env.basestation import SmallCellBaseStation
 from env.user_equipment import UserEquipment
-from env.core import generate_triangle_coverage
+from env.core import generate_triangle_coverage, generate_five_bs_coverage
 
 from lymarl_extension.utils_happo import set_seed
 from lymarl_extension.env_happo import HAPPOEnvironment
 from lymarl_extension.trainer_happo import HAPPOTrainer
 
 
-def make_env(seed, lambda_E, use_hard_constraint):
+def make_env(seed, lambda_E, kappa, use_hard_constraint, hard_window_len=10000):
     set_seed(seed)
 
     area_size = 100
-    num_users = 20
+    num_users = 10
 
     sbs_positions = generate_triangle_coverage(area_size, 35)
     sbs_list = [SmallCellBaseStation(i + 1, pos, 10, 35) for i, pos in enumerate(sbs_positions)]
@@ -33,14 +33,11 @@ def make_env(seed, lambda_E, use_hard_constraint):
         enable_channel_variation=True,
         on_window=100,
         bs_top_k=5,
-        hard_window_len=10000,
+        hard_window_len=hard_window_len,
         bs_over_penalty=100.0,
-        eta_q=1.0,
-        alpha_rate=3.0,
-        beta_z=1.0,
         use_hard_constraint=use_hard_constraint,   # training: no hard constraint
         lambda_E=lambda_E,
-        kappa=0.01
+        kappa=kappa
     )
     return env
 
@@ -61,25 +58,24 @@ def make_trainer(env):
     )
 
 if __name__ == "__main__":
-    seed = 0
-    lambda_list = [5.0, 10.0, 15.0, 20.0]
+    seed = 42
+    kappa = 0.05
+    lambda_list = [10.0, 15.0, 20.0]
 
     os.makedirs("results_lambda", exist_ok=True)
 
-    for lam in lambda_list:
-        print(f"\n=== Training with lambda_E = {lam} ===")
-        # env = make_env(seed, lam)
-        # trainer = make_trainer(env)
-        env_soft = make_env(seed, lam, use_hard_constraint=False)
+    for lambda_E in lambda_list:
+        print(f"\n=== Training with lambda_E = {lambda_E} ===")
+        
+        # --------------------------------------------------
+        # Soft Training
+        # --------------------------------------------------
+        env_soft = make_env(seed, lambda_E, kappa=kappa, use_hard_constraint=False)
         trainer_soft = make_trainer(env_soft)
-        
-        
-        # --------------------------------------------------
-        # Train
-        # --------------------------------------------------
+
         train_steps = 50000
-        train_npz_path = f"results_lambda/LyMARL_train_rewards_lambda_{lam}.npz"
-        model_path = f"results_lambda/LyMARL_model_lambda_{lam}.pt"
+        train_npz_path = f"results_lambda/LyMARL_train_rewards_lambda_{lambda_E}.npz"
+        model_path = f"results_lambda/LyMARL_model_lambda_{lambda_E}.pt"
 
         trainer_soft.train(
             n_steps=train_steps,
@@ -89,8 +85,8 @@ if __name__ == "__main__":
 
         trainer_soft.save_model(model_path)
     
-        print(f"\n=== Eval only with lambda_E = {lam} ===")
-        model_path = f"results_lambda/LyMARL_model_lambda_{lam}.pt"
+        print(f"\n=== Eval only with lambda_E = {lambda_E} ===")
+        model_path = f"results_lambda/LyMARL_model_lambda_{lambda_E}.pt"
         if not os.path.exists(model_path):
             print(f"[Error] Model not found: {model_path}")
             continue
@@ -99,23 +95,23 @@ if __name__ == "__main__":
         # hard constraint OFF eval
         # --------------------------------------------------
         trainer_soft.load_model(model_path)
-        soft_eval_npz_path = f"results_lambda/LyMARL_eval_soft_lambda_{lam}.npz"
+        soft_eval_npz_path = f"results_lambda/LyMARL_eval_soft_lambda_{lambda_E}.npz"
         trainer_soft.evaluate(
-            n_steps=50000,
+            n_steps=30000,
             save_npz_path=soft_eval_npz_path
         )
 
         # --------------------------------------------------
         # hard constraint ON eval
         # --------------------------------------------------
-        # env_hard = make_env(seed, lam, use_hard_constraint=True)
-        # trainer_hard = make_trainer(env_hard)
-        # trainer_hard.load_model(model_path)
+        env_hard = make_env(seed, lambda_E, kappa=kappa, use_hard_constraint=True)
+        trainer_hard = make_trainer(env_hard)
+        trainer_hard.load_model(model_path)
         
-        # hard_eval_npz_path = f"results_lambda/LyMARL_eval_hard_lambda_{lam}.npz"
-        # trainer_hard.evaluate(
-        #     n_steps=50000, 
-        #     save_npz_path=hard_eval_npz_path
-        # )
+        hard_eval_npz_path = f"results_lambda/LyMARL_eval_hard_lambda_{lambda_E}.npz"
+        trainer_hard.evaluate(
+            n_steps=30000,
+            save_npz_path=hard_eval_npz_path
+        )
 
     print("\n✅ Completed!\n")
