@@ -210,7 +210,7 @@ class MaxSNRBaseline:
 
             for bs in self.base_stations:
                 bs_id = bs.bs_id
-                rate = self.compute_pf_score(ue_id, bs_id)
+                rate = self.calculate_achievable_rate(ue_id, bs_id)
 
                 if rate > best_rate:
                     best_rate = rate
@@ -672,7 +672,7 @@ if __name__ == "__main__":
     area_size = 100
     num_users = 20
     max_slots = 30000
-    lambda_list = [5.0, 10.0, 15.0, 20.0]
+    lambda_list = [15.0, 20.0]
 
     for lambda_E in lambda_list:
         print(f"\n{'='*80}")
