@@ -58,7 +58,7 @@ def make_trainer(env):
     )
 
 if __name__ == "__main__":
-    seed = 42
+    seed = 0
     kappa_list = [0.01, 0.02, 0.03]
     lambda_E = 15.0
 

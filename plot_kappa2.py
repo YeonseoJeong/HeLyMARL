@@ -9,9 +9,11 @@ import matplotlib.pyplot as plt
 plt.rcParams.update({
     "font.family": "Times New Roman",
     "mathtext.fontset": "stix",
-    "font.size": 20,
+    "font.size": 22,
+    "font.weight": "bold",
     "axes.titlesize": 22,
     "axes.labelsize": 20,
+    "axes.labelweight": "bold",
     "xtick.labelsize": 20,
     "ytick.labelsize": 20,
     "legend.fontsize": 20,
