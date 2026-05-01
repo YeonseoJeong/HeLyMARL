@@ -14,7 +14,7 @@ def make_env(seed, lambda_E, kappa, use_hard_constraint, hard_window_len=10000):
     set_seed(seed)
 
     area_size = 100
-    num_users = 10
+    num_users = 20
 
     sbs_positions = generate_triangle_coverage(area_size, 35)
     sbs_list = [SmallCellBaseStation(i + 1, pos, 10, 35) for i, pos in enumerate(sbs_positions)]
@@ -59,23 +59,23 @@ def make_trainer(env):
 
 if __name__ == "__main__":
     seed = 42
-    kappa = 0.05
-    lambda_list = [10.0, 15.0, 20.0]
+    kappa_list = [0.01, 0.02, 0.03]
+    lambda_E = 15.0
 
-    os.makedirs("results_lambda", exist_ok=True)
+    os.makedirs("results_kappa", exist_ok=True)
 
-    for lambda_E in lambda_list:
-        print(f"\n=== Training with lambda_E = {lambda_E} ===")
-        
+    for kappa in kappa_list:
+        print(f"\n=== Training with kappa = {kappa} ===")
+
         # --------------------------------------------------
         # Soft Training
         # --------------------------------------------------
         env_soft = make_env(seed, lambda_E, kappa=kappa, use_hard_constraint=False)
         trainer_soft = make_trainer(env_soft)
 
-        train_steps = 50000
-        train_npz_path = f"results_lambda/LyMARL_train_rewards_lambda_{lambda_E}.npz"
-        model_path = f"results_lambda/LyMARL_model_lambda_{lambda_E}.pt"
+        train_steps = 30000
+        train_npz_path = f"results_kappa/LyMARL_train_rewards_kappa_{kappa}.npz"
+        model_path = f"results_kappa/LyMARL_model_kappa_{kappa}.pt"
 
         trainer_soft.train(
             n_steps=train_steps,
@@ -85,8 +85,8 @@ if __name__ == "__main__":
 
         trainer_soft.save_model(model_path)
     
-        print(f"\n=== Eval only with lambda_E = {lambda_E} ===")
-        model_path = f"results_lambda/LyMARL_model_lambda_{lambda_E}.pt"
+        print(f"\n=== Eval only with kappa = {kappa} ===")
+        model_path = f"results_kappa/LyMARL_model_kappa_{kappa}.pt"
         if not os.path.exists(model_path):
             print(f"[Error] Model not found: {model_path}")
             continue
@@ -94,12 +94,12 @@ if __name__ == "__main__":
         # --------------------------------------------------
         # hard constraint OFF eval
         # --------------------------------------------------
-        trainer_soft.load_model(model_path)
-        soft_eval_npz_path = f"results_lambda/LyMARL_eval_soft_lambda_{lambda_E}.npz"
-        trainer_soft.evaluate(
-            n_steps=30000,
-            save_npz_path=soft_eval_npz_path
-        )
+        # trainer_soft.load_model(model_path)
+        # soft_eval_npz_path = f"results_kappa/LyMARL_eval_soft_kappa_{kappa}.npz"
+        # trainer_soft.evaluate(
+        #     n_steps=30000,
+        #     save_npz_path=soft_eval_npz_path
+        # )
 
         # --------------------------------------------------
         # hard constraint ON eval
@@ -108,7 +108,7 @@ if __name__ == "__main__":
         trainer_hard = make_trainer(env_hard)
         trainer_hard.load_model(model_path)
         
-        hard_eval_npz_path = f"results_lambda/LyMARL_eval_hard_lambda_{lambda_E}.npz"
+        hard_eval_npz_path = f"results_kappa/LyMARL_eval_hard_kappa_{kappa}.npz"
         trainer_hard.evaluate(
             n_steps=30000,
             save_npz_path=hard_eval_npz_path

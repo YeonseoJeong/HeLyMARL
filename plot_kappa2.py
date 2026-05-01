@@ -9,12 +9,12 @@ import matplotlib.pyplot as plt
 plt.rcParams.update({
     "font.family": "Times New Roman",
     "mathtext.fontset": "stix",
-    "font.size": 14,
-    "axes.titlesize": 15,
-    "axes.labelsize": 14,
-    "xtick.labelsize": 12,
-    "ytick.labelsize": 12,
-    "legend.fontsize": 12,
+    "font.size": 20,
+    "axes.titlesize": 22,
+    "axes.labelsize": 20,
+    "xtick.labelsize": 20,
+    "ytick.labelsize": 20,
+    "legend.fontsize": 20,
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
 })
@@ -43,7 +43,7 @@ def plot_train_curve_and_eval_bar(
 ):
     os.makedirs(save_dir, exist_ok=True)
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    fig, axes = plt.subplots(1, 2, figsize=(15.5, 6.0))
 
     ax1 = axes[0]   # left: training curve
     ax2 = axes[1]   # right: eval bar
@@ -106,7 +106,7 @@ def plot_train_curve_and_eval_bar(
 
     ax1.set_xlabel("Training Step")
     ax1.set_ylabel(f"Handover Ratio (MA{window})")
-    ax1.set_title("Training Handover Ratio")
+    # ax1.set_title("Training Handover Ratio")
     ax1.grid(True, alpha=0.3)
     if found_train:
         ax1.legend()
@@ -170,7 +170,8 @@ def plot_train_curve_and_eval_bar(
         ax2.set_xticks(x_bar)
         ax2.set_xticklabels(eval_labels)
         ax2.set_ylabel("Average Handover Ratio")
-        ax2.set_title("Evaluation Mean Handover Ratio")
+        # ax2.set_title("Evaluation Mean Handover Ratio")
+        ax2.set_ylim(0, 0.03)
         ax2.grid(True, axis="y", alpha=0.3)
         # ax2.legend()
 
@@ -182,7 +183,7 @@ def plot_train_curve_and_eval_bar(
                 f"{val:.3f}",
                 ha="center",
                 va="bottom",
-                fontsize=10
+                fontsize=17
             )
 
     plt.tight_layout()
