@@ -1,0 +1,131 @@
+scenario:
+  area_size: 100
+  num_users: 20
+  coverage_radius: 35
+  beam_limit: 10
+  seed: 0
+
+env:
+  V: 5.0
+  power_budget_ratio: 0.6
+  enable_mobility: true
+  enable_channel_variation: true
+  on_window: 100
+  bs_top_k: 5
+  hard_window_len: 10000
+  bs_over_penalty: 100.0
+  eta_q: 1.0
+  alpha_rate: 3.0
+  beta_z: 1.0
+
+train:
+  n_steps: 50000
+  update_interval: 128
+  lr_actor_ue: 3.0e-4
+  lr_actor_bs: 3.0e-4
+  lr_critic_ue: 1.0e-3
+  lr_critic_bs: 1.0e-3
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  entropy_coef_ue: 0.05
+  entropy_coef_bs: 0.05
+  value_coef_ue: 0.5
+  value_coef_bs: 0.5
+  n_epochs: 4
+  minibatch_size: 256
+
+paths:
+  model: outputs/models/LyMARL.pt
+  train_log: outputs/logs/lymarl/LyMARL_train_rewards.npz
+  eval_log: outputs/logs/lymarl/LyMARL_eval.npz
+
+# Why: MAPPO-Lagrangian dual-ascent hyperparameters (docs/additional_lagrangian_marl.md, §4).
+lagrangian:
+  eta_mu: 1.0e-3
+  dual_update_interval: 1000
+
+ddpp:
+  n_steps: 10000
+  use_hard_constraint: true
+  save_path: outputs/logs/ddpp/ddpp_activation.npz
+
+logging:
+  enabled: false
+  backend: tensorboard
+  log_dir: outputs/runs
+  project: LyMARL
+  entity: null
+  run_name: null
+  mode: online
+  log_interval: 100
+
+unicrit:
+  w_ue: 1.0
+  w_bs: 1.0
+  paths:
+    model: outputs/models/UniCrit.pt
+    train_log: outputs/logs/unicrit/UniCrit_train_rewards.npz
+    eval_log: outputs/logs/unicrit/UniCrit_eval.npz
+
+qmix:
+  n_steps: 20000
+  n_eval_steps: 10000
+  buffer_size: 1000
+  batch_size: 32
+  train_freq: 4
+  warmup_steps: 1000
+  target_update_interval: 200
+  lr: 3.0e-4
+  gamma: 0.99
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_anneal_steps: 20000
+  max_grad_norm: 10.0
+  mixer_hidden_dim: 64
+  hidden_dim: 128
+  w_ue: 1.0
+  w_bs: 1.0
+  reward_norm: false
+  reward_norm_clip: 10.0
+  reward_norm_ema_decay: 0.99
+  train_with_hard_constraint: true
+  beta_z: 0.0
+  bs_over_penalty: 0.0
+  hetero_mixer: false
+  paths:
+    model: outputs/models/QMIX.pt
+    train_log: outputs/logs/qmix/QMIX_train_rewards.npz
+    eval_log: outputs/logs/qmix/QMIX_eval.npz
+
+qplex:
+  n_steps: 50000
+  n_eval_steps: 10000
+  buffer_size: 5000
+  batch_size: 32
+  train_freq: 4
+  warmup_steps: 1000
+  target_update_interval: 200
+  lr: 3.0e-4
+  gamma: 0.99
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_anneal_steps: 10000
+  max_grad_norm: 10.0
+  mixer_hidden_dim: 64
+  hidden_dim: 128
+  w_ue: 1.0
+  w_bs: 1.0
+  reward_norm: true
+  reward_norm_clip: 10.0
+  paths:
+    model: outputs/models/QPLEX.pt
+    train_log: outputs/logs/qplex/QPLEX_train_rewards.npz
+    eval_log: outputs/logs/qplex/QPLEX_eval.npz
+
+# Why: Optional per-BS heterogeneity to smoke-test HetCrit advantage; defaults preserve symmetric scenario.
+asymmetry:
+  enabled: false
+  power_budget_ratio_per_bs: [0.4, 0.6, 0.8]   # length must match num small-cell BSs (3)
+  tx_power_dbm_per_bs: [22.0, 20.0, 18.0]      # dBm per BS; ~4 dB spread keeps coverage overlapping
+

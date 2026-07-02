@@ -21,6 +21,7 @@ plt.rcParams.update({
     "ps.fonttype": 42,
 })
 
+
 def moving_average(x, window=1000):
     x = np.asarray(x, dtype=np.float32)
 
@@ -37,28 +38,17 @@ def moving_average(x, window=1000):
     return np.convolve(x, kernel, mode="valid")
 
 
-def plot_train_curve_and_eval_bar(
+def plot_train_curve(
     result_dir="results_kappa",
     save_dir="results_kappa/plots",
-    kappas=(0.01, 0.03, 0.05),
+    kappas=(0.01, 0.02, 0.03),
     window=1000,
 ):
     os.makedirs(save_dir, exist_ok=True)
 
-    fig, axes = plt.subplots(1, 2, figsize=(15.5, 6.0))
-
-    ax1 = axes[0]   # left: training curve
-    ax2 = axes[1]   # right: eval bar
+    fig, ax = plt.subplots(figsize=(7.5, 6.0))
 
     colors = ["C0", "C2", "C3"]
-
-    eval_means = []
-    eval_budgets = []
-    eval_labels = []
-
-    # --------------------------------------------------
-    # Left subplot: training curves
-    # --------------------------------------------------
     found_train = False
 
     for i, kappa in enumerate(kappas):
@@ -88,15 +78,15 @@ def plot_train_curve_and_eval_bar(
         x = np.arange(window - 1, window - 1 + len(ho_ma))
         color = colors[i % len(colors)]
 
-        ax1.plot(
+        ax.plot(
             x,
             ho_ma,
             linewidth=2.0,
             color=color,
-            label=f"Train κ = {budget:.2f}"
+            label=f"Train $\\kappa$ = {budget:.2f}"
         )
 
-        ax1.axhline(
+        ax.axhline(
             y=budget,
             linestyle="--",
             linewidth=1.3,
@@ -106,16 +96,39 @@ def plot_train_curve_and_eval_bar(
 
         found_train = True
 
-    ax1.set_xlabel("Training Step")
-    ax1.set_ylabel(f"Handover Ratio (MA{window})")
-    # ax1.set_title("Training Handover Ratio")
-    ax1.grid(True, alpha=0.3)
-    if found_train:
-        ax1.legend()
+    ax.set_xlabel("Training Step")
+    ax.set_ylabel(f"Handover Ratio (MA{window})")
+    ax.grid(True, alpha=0.3)
 
-    # --------------------------------------------------
-    # Right subplot: eval mean bar chart
-    # --------------------------------------------------
+    if found_train:
+        ax.legend()
+
+    plt.tight_layout()
+
+    save_path = os.path.join(
+        save_dir,
+        "train_handover_curve_kappa.png"
+    )
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", format="png")
+    plt.close()
+
+    print(f"✅ Saved: {save_path}")
+
+
+def plot_eval_bar(
+    result_dir="results_kappa",
+    save_dir="results_kappa/plots",
+    kappas=(0.01, 0.02, 0.03),
+):
+    os.makedirs(save_dir, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(7.5, 6.0))
+
+    colors = ["C0", "C2", "C3"]
+
+    eval_means = []
+    eval_labels = []
+
     found_eval = False
 
     for i, kappa in enumerate(kappas):
@@ -141,15 +154,10 @@ def plot_train_curve_and_eval_bar(
         else:
             budget = float(kappa)
 
-        # 전체 eval 평균
         mean_val = float(np.mean(ho_ratio))
 
-        # 만약 마지막 구간 평균으로 보고 싶으면 아래처럼 바꾸면 됨:
-        # mean_val = float(np.mean(ho_ratio[-5000:]))
-
         eval_means.append(mean_val)
-        eval_budgets.append(budget)
-        eval_labels.append(f"κ = {budget:.2f}")
+        eval_labels.append(f"$\\kappa$ = {budget:.2f}")
 
         found_eval = True
 
@@ -157,42 +165,36 @@ def plot_train_curve_and_eval_bar(
         x_bar = np.arange(len(eval_means))
         bar_colors = [colors[i % len(colors)] for i in range(len(eval_means))]
 
-        ax2.bar(
+        ax.bar(
             x_bar,
             eval_means,
             color=bar_colors,
             alpha=0.85,
-            width=0.6,
-            label="Eval mean HO ratio"
+            width=0.6
         )
 
-        # budget legend용 dummy line
-        # ax2.plot([], [], linestyle="--", color="black", label="Budget")
+        ax.set_xticks(x_bar)
+        ax.set_xticklabels(eval_labels)
+        ax.set_ylabel("Average Handover Ratio")
+        ax.set_ylim(0, 0.03)
+        ax.grid(True, axis="y", alpha=0.3)
 
-        ax2.set_xticks(x_bar)
-        ax2.set_xticklabels(eval_labels)
-        ax2.set_ylabel("Average Handover Ratio")
-        # ax2.set_title("Evaluation Mean Handover Ratio")
-        ax2.set_ylim(0, 0.03)
-        ax2.grid(True, axis="y", alpha=0.3)
-        # ax2.legend()
-
-        # bar 위에 숫자 표시
         for i, val in enumerate(eval_means):
-            ax2.text(
+            ax.text(
                 i,
                 val + 0.001,
                 f"{val:.3f}",
                 ha="center",
                 va="bottom",
-                fontsize=17
+                fontsize=17,
+                fontweight="bold"
             )
 
     plt.tight_layout()
 
     save_path = os.path.join(
         save_dir,
-        "train_curve_eval_bar_kappa_0.01_0.02_0.03.png"
+        "eval_handover_bar_kappa.png"
     )
     plt.savefig(save_path, dpi=300, bbox_inches="tight", format="png")
     plt.close()
@@ -201,9 +203,17 @@ def plot_train_curve_and_eval_bar(
 
 
 if __name__ == "__main__":
-    plot_train_curve_and_eval_bar(
+    kappas = (0.01, 0.02, 0.03)
+
+    plot_train_curve(
         result_dir="results_kappa",
         save_dir="results_kappa/plots",
-        kappas=(0.01, 0.02, 0.03),
+        kappas=kappas,
         window=1000,
+    )
+
+    plot_eval_bar(
+        result_dir="results_kappa",
+        save_dir="results_kappa/plots",
+        kappas=kappas,
     )
