@@ -75,8 +75,8 @@ if __name__ == "__main__":
         env_soft = make_env(seed, lambda_E, kappa=kappa, use_hard_constraint=False)
         trainer_soft = make_trainer(env_soft)
 
-        train_npz_path = f"results/results_kappa/LyMARL_train_rewards_kappa_{kappa}.npz"
-        model_path = f"results/results_kappa/LyMARL_model_kappa_{kappa}.pt"
+        train_npz_path = f"results/results_kappa/HeLyMARL_train_rewards_kappa_{kappa}.npz"
+        model_path = f"results/results_kappa/HeLyMARL_model_kappa_{kappa}.pt"
 
         # trainer_soft.train(
         #     n_episodes=train_episodes,
@@ -93,7 +93,7 @@ if __name__ == "__main__":
         trainer_hard = make_trainer(env_hard)
         trainer_hard.load_model(model_path)
         
-        hard_eval_npz_path = f"results/results_kappa/LyMARL_eval_hard_kappa_{kappa}.npz"
+        hard_eval_npz_path = f"results/results_kappa/HeLyMARL_eval_hard_kappa_{kappa}.npz"
         
         trainer_hard.evaluate(
             n_episodes=eval_episode,
