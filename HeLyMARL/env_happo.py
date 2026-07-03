@@ -17,8 +17,8 @@ class HAPPOEnvironment:
         self,
         base_stations: List[BaseStation],
         users: List[UserEquipment],
-        V: float = 20.0,
-        power_budget_ratio: float = 0.8,
+        V: float = 5.0,
+        power_budget_ratio: float = 0.6,
         enable_mobility: bool = True,
         enable_channel_variation: bool = True,
         on_window: int = 100,
@@ -696,23 +696,19 @@ class HAPPOEnvironment:
     # =========================================================
     # Metric
     # =========================================================
-    def calculate_jain_fairness(self, rate_history, window: int = 100, exclude_all_zero_slots: bool = True):
-        recent = rate_history if len(rate_history) < window else rate_history[-window:]
-
-        if not recent:
+    def calculate_jain_fairness(self, rate_history, window = None):
+        if len(rate_history) == 0:
             return 0.0
+
+        if window is not None:
+            recent = rate_history[-window:]
+        else:
+            recent = rate_history
 
         rate_array = np.asarray(recent, dtype=np.float32)
 
         if rate_array.ndim != 2:
             return 0.0
-
-        if exclude_all_zero_slots:
-            active_slot_mask = np.sum(rate_array, axis=1) > 1e-12
-            rate_array = rate_array[active_slot_mask]
-
-            if rate_array.shape[0] == 0:
-                return 0.0
 
         per_user_avg = rate_array.mean(axis=0)
 
@@ -724,3 +720,47 @@ class HAPPOEnvironment:
             return 0.0
 
         return float((sum_rates ** 2) / (n_users * sum_squared))
+    
+    def compute_block_jain_fairness(self, slot_rates, block_size: int = 1000, eps: float = 1e-12):
+        """
+        slot_rates: list or np.ndarray with shape [T, U]
+        Returns:
+            mean_block_jfi: scalar
+            block_jfis: np.ndarray [num_blocks]
+            block_x: np.ndarray [num_blocks], block end step indices
+        """
+        rates = np.asarray(slot_rates, dtype=np.float32)
+
+        if rates.ndim != 2 or rates.shape[0] == 0:
+            return 0.0, np.asarray([], dtype=np.float32), np.asarray([], dtype=np.int32)
+
+        T, U = rates.shape
+        block_jfis = []
+        block_x = []
+
+        for start in range(0, T, block_size):
+            block = rates[start:start + block_size]
+
+            if block.shape[0] == 0:
+                continue
+
+            # user별 block 평균 rate
+            avg_user_rates = block.mean(axis=0)  # [U]
+
+            sum_rates = float(avg_user_rates.sum())
+            sum_squared = float(np.sum(avg_user_rates ** 2))
+
+            if sum_squared < eps:
+                jfi = 0.0
+            else:
+                jfi = (sum_rates ** 2) / (U * sum_squared + eps)
+
+            block_jfis.append(float(jfi))
+            block_x.append(start + block.shape[0])
+
+        block_jfis = np.asarray(block_jfis, dtype=np.float32)
+        block_x = np.asarray(block_x, dtype=np.int32)
+
+        mean_block_jfi = float(block_jfis.mean()) if block_jfis.size > 0 else 0.0
+
+        return mean_block_jfi, block_jfis, block_x

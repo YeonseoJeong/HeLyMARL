@@ -5,9 +5,9 @@ from env.basestation import SmallCellBaseStation
 from env.user_equipment import UserEquipment
 from env.core import generate_triangle_coverage, generate_five_bs_coverage
 
-from lymarl_extension.utils_happo import set_seed
-from lymarl_extension.env_happo import HAPPOEnvironment
-from lymarl_extension.trainer_happo import HAPPOTrainer
+from HeLyMARL.utils_happo import set_seed
+from HeLyMARL.env_happo import HAPPOEnvironment
+from HeLyMARL.trainer_happo import HAPPOTrainer
 
 
 def make_env(seed, lambda_E, kappa, use_hard_constraint, hard_window_len=10000):
@@ -59,58 +59,45 @@ def make_trainer(env):
 
 if __name__ == "__main__":
     seed = 0
-    kappa_list = [0.01, 0.02, 0.03]
+    kappa_list = [0.03]
     lambda_E = 15.0
 
-    os.makedirs("results_kappa", exist_ok=True)
+    steps_per_episode = 10000
+    train_episodes = 10
+    eval_episode = 1
+    update_interval = 128
+
+    os.makedirs("results/results_kappa", exist_ok=True)
 
     for kappa in kappa_list:
         print(f"\n=== Training with kappa = {kappa} ===")
 
-        # --------------------------------------------------
-        # Soft Training
-        # --------------------------------------------------
         env_soft = make_env(seed, lambda_E, kappa=kappa, use_hard_constraint=False)
         trainer_soft = make_trainer(env_soft)
 
-        train_steps = 30000
-        train_npz_path = f"results_kappa/LyMARL_train_rewards_kappa_{kappa}.npz"
-        model_path = f"results_kappa/LyMARL_model_kappa_{kappa}.pt"
+        train_npz_path = f"results/results_kappa/LyMARL_train_rewards_kappa_{kappa}.npz"
+        model_path = f"results/results_kappa/LyMARL_model_kappa_{kappa}.pt"
 
-        trainer_soft.train(
-            n_steps=train_steps,
-            update_interval=128,
-            save_npz_path=train_npz_path
-        )
-
-        trainer_soft.save_model(model_path)
-    
-        print(f"\n=== Eval only with kappa = {kappa} ===")
-        model_path = f"results_kappa/LyMARL_model_kappa_{kappa}.pt"
-        if not os.path.exists(model_path):
-            print(f"[Error] Model not found: {model_path}")
-            continue
-
-        # --------------------------------------------------
-        # hard constraint OFF eval
-        # --------------------------------------------------
-        # trainer_soft.load_model(model_path)
-        # soft_eval_npz_path = f"results_kappa/LyMARL_eval_soft_kappa_{kappa}.npz"
-        # trainer_soft.evaluate(
-        #     n_steps=30000,
-        #     save_npz_path=soft_eval_npz_path
+        # trainer_soft.train(
+        #     n_episodes=train_episodes,
+        #     steps_per_episode=steps_per_episode,
+        #     update_interval=update_interval,
+        #     save_npz_path=train_npz_path
         # )
 
-        # --------------------------------------------------
-        # hard constraint ON eval
-        # --------------------------------------------------
-        env_hard = make_env(seed, lambda_E, kappa=kappa, use_hard_constraint=True)
+        # trainer_soft.save_model(model_path)
+    
+        print(f"\n=== Hard Eval with kappa = {kappa} ===")
+
+        env_hard = make_env(seed, lambda_E, kappa=kappa, use_hard_constraint=True, hard_window_len=steps_per_episode)
         trainer_hard = make_trainer(env_hard)
         trainer_hard.load_model(model_path)
         
-        hard_eval_npz_path = f"results_kappa/LyMARL_eval_hard_kappa_{kappa}.npz"
+        hard_eval_npz_path = f"results/results_kappa/LyMARL_eval_hard_kappa_{kappa}.npz"
+        
         trainer_hard.evaluate(
-            n_steps=30000,
+            n_episodes=eval_episode,
+            steps_per_episode=steps_per_episode,
             save_npz_path=hard_eval_npz_path
         )
 

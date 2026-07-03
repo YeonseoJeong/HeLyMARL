@@ -8,13 +8,13 @@ from torch.distributions import Categorical
 from collections import defaultdict
 from typing import Dict, Optional
 
-from lymarl_extension.networks_happo import (
+from HeLyMARL.networks_happo import (
     UEActorNetwork,
     BSActorNetwork,
     CentralizedCritic,
     ValueNorm
 )
-from lymarl_extension.utils_happo import moving_avg, block_avg_1d
+from HeLyMARL.utils_happo import moving_avg, block_avg_1d
 
 
 class HAPPOTrainer:
@@ -403,167 +403,193 @@ class HAPPOTrainer:
     # =========================================================
     # Train / Eval
     # =========================================================
-    def train(self, n_steps: int, update_interval: int = 128, save_npz_path: Optional[str] = None):
+    def train(self, 
+              n_episodes: int,
+              steps_per_episode: int,
+              update_interval: int = 128,
+              save_npz_path: Optional[str] = None
+        ):
+
         print(f"\n{'='*100}")
-        print(" HAPPO Training")
+        print(" HAPPO Training - Episodic")
         print(f"{'='*100}")
-        print(f"Total train steps: {n_steps}")
+        print(f"Total train episodes: {n_episodes}")
+        print(f"Steps per episode: {steps_per_episode}")
+        print(f"Total train steps: {n_episodes * steps_per_episode}")
         print(f"Update interval: {update_interval}")
         print(f"Hard constraint during training: {self.env.use_hard_constraint}")
         print(f"{'='*100}\n")
 
-        throughput_history = []
-        fairness_history = []
-        power_history = {bs.bs_id: [] for bs in self.env.base_stations}
-        slot_rates = []
-        queue_history = {"Q_u": defaultdict(list), "Z_b": defaultdict(list)}
-
-        global_reward_hist = []
-        ue_per_user_reward_hist = []
-
-        handover_count_history = []
-        handover_ratio_history = []
-        Q_mean_history = []
-        Z_mean_history = []
-        G_mean_history = []
-        G_max_history = []
-        
-        # loss histories, recorded per PPO update
+        # --------------------------------------------------
+        # Minimal training logs
+        # --------------------------------------------------
         update_step_history = []
+        update_episode_history = []
+
         critic_loss_history = []
         actor_ue_loss_history = []
         actor_bs_loss_history = []
         entropy_ue_history = []
         entropy_bs_history = []
 
-        local_obs, global_obs = self.env.reset()
+        # reward / queue logs 정도만 training에서 확인
+        global_reward_history = []
+        Q_mean_history = []
+        Z_mean_history = []
+        G_mean_history = []
+        G_max_history = []
 
-        for step in range(n_steps):
-            (ue_actions, ue_logp_np, ue_ent_np, ue_masks_np,
-             bs_actions, bs_logp_np, bs_ent_np, bs_obs_np, bs_masks_np, cand_lists,
-             v_n) = self.select_actions(local_obs, global_obs)
+        # optional: episode-level summaries
+        episode_reward_history = []
+        episode_Q_last_history = []
+        episode_Z_last_history = []
+        episode_G_last_history = []
 
-            next_local_obs, next_global_obs, info, done = self.env.step_joint(
-                ue_actions=ue_actions,
-                bs_actions=bs_actions,
-                cand_lists=cand_lists
-            )
+        global_step = 0
 
-            ho_count = float(info["total_HO_count"])
-            ho_ratio = ho_count / max(1, self.env.n_agents)
-            handover_count_history.append(ho_count)
-            handover_ratio_history.append(ho_ratio)
+        for ep in range(n_episodes):
+            # --------------------------------------------------
+            # Episode reset
+            # 여기서 env.reset()은 현재 코드 기준으로 topology까지 reset함.
+            # topology 유지하고 싶으면 env 쪽 reset_episode(reset_topology=False)를 따로 만드는 게 좋음.
+            # --------------------------------------------------
+            local_obs, global_obs = self.env.reset()
+            self.reset_rollout()
 
-            Q_vals = list(info["Q_u"].values())
-            Z_vals = list(info["Z_b"].values())
-            G_vals = list(info["G_u"].values())
+            ep_reward_sum = 0.0
 
-            Q_mean_history.append(np.mean(Q_vals))
-            Z_mean_history.append(np.mean(Z_vals))
-            G_mean_history.append(np.mean(G_vals))
-            G_max_history.append(np.max(G_vals))
+            for ep_step in range(steps_per_episode):
+                global_step += 1
 
-            with torch.no_grad():
-                next_global_t = torch.as_tensor(next_global_obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-                nv_n = self.critic(next_global_t).squeeze(0).detach().cpu().numpy().astype(np.float32)
+                (ue_actions, ue_logp_np, ue_ent_np, ue_masks_np,
+                bs_actions, bs_logp_np, bs_ent_np, bs_obs_np, bs_masks_np, cand_lists, v_n) = self.select_actions(local_obs, global_obs)
 
-            reward = float(info["global_reward"])
-
-            self.store_step(
-                local_obs=local_obs,
-                global_obs=global_obs,
-                ue_actions_dict=ue_actions,
-                ue_logp_np=ue_logp_np,
-                ue_masks_np=ue_masks_np,
-                bs_actions_dict=bs_actions,
-                bs_logp_np=bs_logp_np,
-                bs_obs_np=bs_obs_np,
-                bs_masks_np=bs_masks_np,
-                cand_lists=cand_lists,
-                reward=reward,
-                v_n=float(v_n),
-                nv_n=float(nv_n),
-                done=done
-            )
-
-            throughput_history.append(info["total_throughput"])
-            rates_this_slot = [info["served_rates"][u.ue_id] for u in self.env.users]
-            slot_rates.append(rates_this_slot)
-            fairness_history.append(self.env.calculate_jain_fairness(slot_rates))
-
-            for bs_id, power in info["power_consumed"].items():
-                power_history[bs_id].append(power)
-
-            for ue_id, q_val in info["Q_u"].items():
-                queue_history["Q_u"][ue_id].append(q_val)
-            for bs_id, zb_val in info["Z_b"].items():
-                queue_history["Z_b"][bs_id].append(zb_val)
-
-            global_reward_hist.append(reward)
-            ue_per_user_reward_hist.append([float(info["ue_per_user_rewards"][u.ue_id]) for u in self.env.users])
-            
-            local_obs, global_obs = next_local_obs, next_global_obs
-
-            if (step + 1) % update_interval == 0:
-                losses = self.update()
-                if losses:
-                    update_step_history.append(step + 1)
-                    critic_loss_history.append(float(losses["critic"]))
-                    actor_ue_loss_history.append(float(losses["actor_ue"]))
-                    actor_bs_loss_history.append(float(losses["actor_bs"]))
-                    entropy_ue_history.append(float(losses["entropy_ue"]))
-                    entropy_bs_history.append(float(losses["entropy_bs"]))
-
-                    print(
-                        f"[UPDATE] Step {step+1} | "
-                        f"UE_Actor:{losses['actor_ue']:.4f} | BS_Actor:{losses['actor_bs']:.4f} | "
-                        f"Critic:{losses['critic']:.4f} |  "
-                        f"Ent(UE):{losses['entropy_ue']:.4f} | Ent(BS):{losses['entropy_bs']:.4f}"
-                    )
-
-            if (step + 1) % 100 == 0:
-                recent_thr = float(np.mean(throughput_history[-100:]))
-                recent_fair = float(fairness_history[-1])
-                global_rew_100 = float(np.mean(global_reward_hist[-100:]))
-
-                ho_count_100 = float(np.mean(handover_count_history[-100:]))
-                ho_ratio_100 = float(np.mean(handover_ratio_history[-100:]))
-                G_mean_now = float(G_mean_history[-1])
-                G_max_now = float(G_max_history[-1])
-
-                on_parts = []
-                for bs in self.env.base_stations:
-                    hist = list(self.env.bs_on_hist[bs.bs_id])
-                    on_ratio_100 = float(np.mean(hist[-100:])) if len(hist) > 0 else 0.0
-                    on_parts.append(f"BS{bs.bs_id}:{on_ratio_100:.3f}")
-                on_str = " ".join(on_parts)
-
-                print(
-                    f"Step {step+1:5d} | Thr:{recent_thr:.3f} | Fair:{recent_fair:.3f} | "
-                    f"ON(100): {on_str} | "
-                    f"HO(100): count={ho_count_100:.3f} ratio={ho_ratio_100:.4f}/{self.env.kappa:.4f} | "
-                    f"Gmean:{G_mean_now:.3f} Gmax:{G_max_now:.3f} | "
-                    f"GlobalRew(100):{global_rew_100:.3f}"
+                next_local_obs, next_global_obs, info, done = self.env.step_joint(
+                    ue_actions=ue_actions,
+                    bs_actions=bs_actions,
+                    cand_lists=cand_lists
                 )
 
+                reward = float(info["global_reward"])
+                ep_reward_sum += reward
+
+                Q_vals = list(info["Q_u"].values())
+                Z_vals = list(info["Z_b"].values())
+                G_vals = list(info["G_u"].values())
+
+                global_reward_history.append(reward)
+                Q_mean_history.append(np.mean(Q_vals))
+                Z_mean_history.append(np.mean(Z_vals))
+                G_mean_history.append(np.mean(G_vals))
+                G_max_history.append(np.max(G_vals))
+
+                # episode 마지막에서만 done=True
+                done_to_store = bool(done or (ep_step == steps_per_episode - 1))
+
+                with torch.no_grad():
+                    next_global_t = torch.as_tensor(next_global_obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    nv_n = self.critic(next_global_t).squeeze(0).detach().cpu().numpy().astype(np.float32)
+
+                self.store_step(
+                    local_obs=local_obs,
+                    global_obs=global_obs,
+                    ue_actions_dict=ue_actions,
+                    ue_logp_np=ue_logp_np,
+                    ue_masks_np=ue_masks_np,
+                    bs_actions_dict=bs_actions,
+                    bs_logp_np=bs_logp_np,
+                    bs_obs_np=bs_obs_np,
+                    bs_masks_np=bs_masks_np,
+                    cand_lists=cand_lists,
+                    reward=reward,
+                    v_n=float(v_n),
+                    nv_n=float(nv_n),
+                    done=done_to_store
+                )
+                
+                local_obs, global_obs = next_local_obs, next_global_obs
+
+                # --------------------------------------------------
+                # PPO/HAPPO update inside episode
+                # - Q/Z/G는 reset하지 않음
+                # - rollout buffer만 update() 안에서 reset됨
+                # --------------------------------------------------
+                should_update = ((ep_step + 1) % update_interval == 0) or done_to_store
+                
+                if should_update:
+                    losses = self.update()
+
+                    if losses:
+                        update_step_history.append(global_step)
+                        update_episode_history.append(ep + 1)
+                        critic_loss_history.append(float(losses["critic"]))
+                        actor_ue_loss_history.append(float(losses["actor_ue"]))
+                        actor_bs_loss_history.append(float(losses["actor_bs"]))
+                        entropy_ue_history.append(float(losses["entropy_ue"]))
+                        entropy_bs_history.append(float(losses["entropy_bs"]))
+
+                        print(
+                            f"[UPDATE] Ep {ep+1:4d} | "
+                            f"EpStep {ep_step+1:5d}/{steps_per_episode} | "
+                            f"GlobalStep {global_step:7d} | "
+                            f"UE_Actor:{losses['actor_ue']:.4f} | "
+                            f"BS_Actor:{losses['actor_bs']:.4f} | "
+                            f"Critic:{losses['critic']:.4f} | "
+                            f"Ent(UE):{losses['entropy_ue']:.4f} | "
+                            f"Ent(BS):{losses['entropy_bs']:.4f}"
+                        )
+
+                # --------------------------------------------------
+                # Light progress logging
+                # 통신 성능은 evaluate에서 보면 되니까 여기서는 queue/reward만 확인
+                # --------------------------------------------------
+                if global_step % 1000 == 0:
+                    recent_reward = float(np.mean(global_reward_history[-1000:]))
+                    print(
+                        f"Ep {ep+1:4d} | "
+                        f"GlobalStep {global_step:7d} | "
+                        f"Reward(1k): {recent_reward:.3f} | "
+                        f"Qmean:{Q_mean_history[-1]:.3f} | "
+                        f"Zmean:{Z_mean_history[-1]:.3f} | "
+                        f"Gmean:{G_mean_history[-1]:.3f} | "
+                        f"Gmax:{G_max_history[-1]:.3f}"
+                    )
+
+            # --------------------------------------------------
+            # Episode summary
+            # 여기서 env.reset()은 아직 호출하지 않음.
+            # 다음 episode 시작에서 reset됨.
+            # --------------------------------------------------
+            episode_reward_history.append(float(ep_reward_sum / max(1, steps_per_episode)))
+            episode_Q_last_history.append(float(Q_mean_history[-1]))
+            episode_Z_last_history.append(float(Z_mean_history[-1]))
+            episode_G_last_history.append(float(G_mean_history[-1]))
+
+            print(
+                f"[EP END] Ep {ep+1:4d} | "
+                f"AvgReward:{episode_reward_history[-1]:.3f} | "
+                f"Last Qmean:{episode_Q_last_history[-1]:.3f} | "
+                f"Last Zmean:{episode_Z_last_history[-1]:.3f} | "
+                f"Last Gmean:{episode_G_last_history[-1]:.3f}"
+            )       
+
         results = {
-            "throughput_history": throughput_history,
-            "fairness_history": fairness_history,
-            "power_history": power_history,
-            "slot_rates": slot_rates,
-            "queue_history": queue_history,
-
-            "global_reward": global_reward_hist,
-            "ue_per_user_reward": ue_per_user_reward_hist,
-            "handover_count_history": handover_count_history,
-            "handover_ratio_history": handover_ratio_history,
-
+            # reward / queue
+            "global_reward": global_reward_history,
             "Q_mean_history": Q_mean_history,
             "Z_mean_history": Z_mean_history,
             "G_mean_history": G_mean_history,
+            "G_max_history": G_max_history,
+
+            # episode summaries
+            "episode_reward_history": episode_reward_history,
+            "episode_Q_last_history": episode_Q_last_history,
+            "episode_Z_last_history": episode_Z_last_history,
+            "episode_G_last_history": episode_G_last_history,
 
             # loss curves
             "update_step_history": update_step_history,
+            "update_episode_history": update_episode_history,
             "critic_loss_history": critic_loss_history,
             "actor_ue_loss_history": actor_ue_loss_history,
             "actor_bs_loss_history": actor_bs_loss_history,
@@ -575,31 +601,39 @@ class HAPPOTrainer:
             self.save_results_npz(results, save_npz_path, tag="train")
 
         return results
+    
 
     @torch.no_grad()
-    def evaluate(self, n_steps: int, save_npz_path: Optional[str] = None):
+    def evaluate(self, 
+                 n_episodes: int,
+                 steps_per_episode: int, 
+                 save_npz_path: Optional[str] = None):
+        
         print(f"\n{'='*84}")
-        print(" EVALUATION (No Learning)")
+        print(" EVALUATION - Episodic Horizon")
         print(f"{'='*84}")
-        print(f"Total eval steps: {n_steps}")
+        print(f"Eval episodes: {n_episodes}")
+        print(f"Steps per episode: {steps_per_episode}")
+        print(f"Total eval steps: {n_episodes * steps_per_episode}")
         print(f"Hard constraint during evaluation: {self.env.use_hard_constraint}\n")
 
         self.ue_actor.eval()
         self.bs_actor.eval()
         self.critic.eval()
 
+        # --------------------------------------------------
+        # Slot-wise histories across all eval episodes
+        # --------------------------------------------------
         throughput_history = []
-        fairness_history = []
+        # fairness_history = []
+        fairness_block_history = []
+        fairness_block_x_history = []
         power_history = {bs.bs_id: [] for bs in self.env.base_stations}
         slot_rates = []
+
         global_reward_hist = []
         ue_per_user_reward_hist = []      
         
-        eval_on100_hist = {bs.bs_id: [] for bs in self.env.base_stations}
-
-        # --------------------------------------------------
-        # New metric histories
-        # --------------------------------------------------
         handover_count_history = []       # slot-wise total handover count
         handover_ratio_history = []       # slot-wise handover ratio = HO / #UE
 
@@ -610,102 +644,223 @@ class HAPPOTrainer:
         Z_mean_history = []
         G_mean_history = []
 
-        local_obs, global_obs = self.env.reset()
+        # --------------------------------------------------
+        # Episode-level summaries
+        # --------------------------------------------------
+        episode_throughput_mean = []
+        episode_fairness_last = []
+        episode_on_ratio_mean = []
+        episode_handover_ratio_mean = []
+        episode_served_ratio_mean = []
+        episode_outage_ratio_mean = []
+        episode_reward_mean = []
 
-        for step in range(n_steps):
-            (ue_actions, ue_logp_np, ue_ent_np, ue_masks_np,
-             bs_actions, bs_logp_np, bs_ent_np, bs_obs_np, bs_masks_np, cand_lists,
-             v_n) = self.select_actions(local_obs, global_obs)
+        global_step = 0
 
-            next_local_obs, next_global_obs, info, done = self.env.step_joint(
-                ue_actions=ue_actions,
-                bs_actions=bs_actions,
-                cand_lists=cand_lists
-            )
-
-            throughput_history.append(info["total_throughput"])
-            rates_this_slot = [info["served_rates"][u.ue_id] for u in self.env.users]
-            slot_rates.append(rates_this_slot)
-            fairness_history.append(self.env.calculate_jain_fairness(slot_rates))
-
+        for ep in range(n_episodes):
             # --------------------------------------------------
-            # Handover metric
+            # Evaluation episode reset
+            # 현재 env.reset()은 Q/Z/G뿐 아니라 위치와 채널도 reset함.
+            # topology/channel을 유지하고 싶으면 env.reset_episode(reset_topology=False)로 바꾸면 됨.
             # --------------------------------------------------
-            ho_count = float(info["total_HO_count"])
-            handover_count_history.append(ho_count)
-            handover_ratio_history.append(ho_count / max(1, self.env.n_agents))
+            local_obs, global_obs = self.env.reset()
 
-            # --------------------------------------------------
-            # Optional QoE / outage metric
-            # served user = rate > 0
-            # --------------------------------------------------
-            served_flags = np.array(
-                [1.0 if info["served_rates"][u.ue_id] > 0.0 else 0.0 for u in self.env.users],
-                dtype=np.float32
-            )
-            served_ratio = float(np.mean(served_flags))
-            served_ratio_history.append(served_ratio)
-            outage_ratio_history.append(1.0 - served_ratio)
+            ep_throughput = []
+            ep_slot_rates = []
+            ep_handover_ratio = []
+            ep_served_ratio = []
+            ep_outage_ratio = []
+            ep_reward = []
 
-            # --------------------------------------------------
-            # Queue mean histories
-            # --------------------------------------------------
-            Q_mean_history.append(float(np.mean(list(info["Q_u"].values()))))
-            Z_mean_history.append(float(np.mean(list(info["Z_b"].values()))))
-            G_mean_history.append(float(np.mean(list(info["G_u"].values()))))
+            ep_power = {bs.bs_id: [] for bs in self.env.base_stations}
+            ep_on100_hist = {bs.bs_id: [] for bs in self.env.base_stations}
 
-            for bs_id, power in info["power_consumed"].items():
-                power_history[bs_id].append(power)
+            for ep_step in range(steps_per_episode):
+                global_step += 1
+                (ue_actions, ue_logp_np, ue_ent_np, ue_masks_np,
+                bs_actions, bs_logp_np, bs_ent_np, bs_obs_np, bs_masks_np, cand_lists,
+                v_n) = self.select_actions(local_obs, global_obs)
 
-            global_reward_hist.append(float(info["global_reward"]))
-            ue_per_user_reward_hist.append([float(info["ue_per_user_rewards"][u.ue_id]) for u in self.env.users])
-
-            local_obs, global_obs = next_local_obs, next_global_obs
-
-            if (step + 1) % 100 == 0:
-                recent_thr = float(np.mean(throughput_history[-100:]))
-                recent_fair = float(fairness_history[-1])
-
-                on_parts = []
-                for bs in self.env.base_stations:
-                    hist = list(self.env.bs_on_hist[bs.bs_id])
-                    on_ratio_100 = float(np.mean(hist[-100:])) if len(hist) > 0 else 0.0
-                    eval_on100_hist[bs.bs_id].append(on_ratio_100)
-                    on_parts.append(f"BS{bs.bs_id}:{on_ratio_100:.3f}")
-                on_str = " ".join(on_parts)
-
-                print(
-                    f"[EVAL] Step {step+1:5d} | Thr:{recent_thr:.3f} | Fair:{recent_fair:.3f} | "
-                    f"ON(100): {on_str}"
+                next_local_obs, next_global_obs, info, done = self.env.step_joint(
+                    ue_actions=ue_actions,
+                    bs_actions=bs_actions,
+                    cand_lists=cand_lists
                 )
 
-            if (step + 1) % 10000 == 0:
-                thr_10k_mean = float(np.mean(throughput_history[-10000:]))
-                fair_10k_mean = float(np.mean(fairness_history[-10000:]))
+                # --------------------------------------------------
+                # Throughput / fairness
+                # --------------------------------------------------
+                total_thr = float(info["total_throughput"])
+                throughput_history.append(total_thr)
+                ep_throughput.append(total_thr)
 
-                on10k_parts = []
-                n_blocks_10k = max(1, 10000 // 100)
-                for bs in self.env.base_stations:
-                    recent_on100 = eval_on100_hist[bs.bs_id][-n_blocks_10k:]
-                    on10k_mean = float(np.mean(recent_on100)) if len(recent_on100) > 0 else 0.0
-                    on10k_parts.append(f"BS{bs.bs_id}:{on10k_mean:.3f}")
-                on10k_str = " ".join(on10k_parts)
+                rates_this_slot = [
+                    float(info["served_rates"][u.ue_id])
+                    for u in self.env.users
+                ]
+                slot_rates.append(rates_this_slot)
+                ep_slot_rates.append(rates_this_slot)
 
-                print(
-                    f"[EVAL-10K] Step {step+1:5d} | "
-                    f"ThroughputMean(10k):{thr_10k_mean:.3f} | "
-                    f"Mean(step-wise Fair(100) over 10k):{fair_10k_mean:.3f} | "
-                    f"ON100-Mean(10k): {on10k_str}"
+                # fairness는 episode 내부 기준으로 계산하는 게 더 자연스러움
+                # fair_now = float(self.env.calculate_jain_fairness(ep_slot_rates))
+                # fairness_history.append(fair_now)
+   
+                # --------------------------------------------------
+                # Handover
+                # --------------------------------------------------
+                ho_count = float(info["total_HO_count"])
+                ho_ratio = ho_count / max(1, self.env.n_agents)
+
+                handover_count_history.append(ho_count)
+                handover_ratio_history.append(ho_ratio)
+                ep_handover_ratio.append(ho_ratio)
+
+                # --------------------------------------------------
+                # Served / outage
+                # --------------------------------------------------
+                served_flags = np.array(
+                    [1.0 if info["served_rates"][u.ue_id] > 0.0 else 0.0
+                    for u in self.env.users],
+                    dtype=np.float32,
                 )
+                served_ratio = float(np.mean(served_flags))
+                outage_ratio = 1.0 - served_ratio
+
+                served_ratio_history.append(served_ratio)
+                outage_ratio_history.append(outage_ratio)
+                ep_served_ratio.append(served_ratio)
+                ep_outage_ratio.append(outage_ratio)
+
+                # --------------------------------------------------
+                # Queue histories
+                # --------------------------------------------------
+                Q_mean_history.append(float(np.mean(list(info["Q_u"].values()))))
+                Z_mean_history.append(float(np.mean(list(info["Z_b"].values()))))
+                G_mean_history.append(float(np.mean(list(info["G_u"].values()))))
+
+                # --------------------------------------------------
+                # Power / ON ratio
+                # --------------------------------------------------
+                for bs_id, power in info["power_consumed"].items():
+                    power = float(power)
+                    power_history[bs_id].append(power)
+                    ep_power[bs_id].append(power)
+
+                # --------------------------------------------------
+                # Reward
+                # --------------------------------------------------
+                reward = float(info["global_reward"])
+                global_reward_hist.append(reward)
+                ep_reward.append(reward)
+
+                ue_per_user_reward_hist.append([
+                    float(info["ue_per_user_rewards"][u.ue_id])
+                    for u in self.env.users
+                ])
+
+                local_obs, global_obs = next_local_obs, next_global_obs
+
+                # --------------------------------------------------
+                # Print every 100 steps
+                # --------------------------------------------------
+                if (ep_step + 1) % 100 == 0:
+                    recent_thr = float(np.mean(ep_throughput[-100:]))
+                    recent_fair = self.env.calculate_jain_fairness(
+                        ep_slot_rates,
+                        window=100
+                    )
+
+                    on_parts = []
+                    for bs in self.env.base_stations:
+                        hist = list(self.env.bs_on_hist[bs.bs_id])
+                        on_ratio_100 = float(np.mean(hist[-100:])) if len(hist) > 0 else 0.0
+                        ep_on100_hist[bs.bs_id].append(on_ratio_100)
+                        on_parts.append(f"BS{bs.bs_id}:{on_ratio_100:.3f}")
+                    on_str = " ".join(on_parts)
+
+                    print(
+                        f"[EVAL] Ep {ep+1:3d} | "
+                        f"Step {ep_step+1:5d}/{steps_per_episode} | "
+                        f"GlobalStep {global_step:7d} | "
+                        f"Thr(100):{recent_thr:.3f} | "
+                        f"Fair:{recent_fair:.3f} | "
+                        f"ON(100): {on_str}"
+                    )
+            
+            # --------------------------------------------------
+            # Episode-level summary
+            # --------------------------------------------------
+            ep_thr_mean = float(np.mean(ep_throughput))
+            # ep_fair_last = float(self.env.calculate_jain_fairness(ep_slot_rates))
+
+            # 1000-step block fairness
+            ep_fair_block_mean, ep_fair_blocks, ep_fair_block_x = self.env.compute_block_jain_fairness(
+                ep_slot_rates,
+                block_size=1000
+            )
+            fairness_block_history.extend(ep_fair_blocks.tolist())
+            fairness_block_x_history.extend(
+                (ep_fair_block_x + ep * steps_per_episode).tolist()
+            )
+            ep_fair_last = ep_fair_block_mean
+
+            ep_ho_mean = float(np.mean(ep_handover_ratio))
+            ep_served_mean = float(np.mean(ep_served_ratio))
+            ep_outage_mean = float(np.mean(ep_outage_ratio))
+            ep_reward_mean_val = float(np.mean(ep_reward))
+
+            on_per_bs = []
+            for bs in self.env.base_stations:
+                powers = np.asarray(ep_power[bs.bs_id], dtype=np.float32)
+                on_per_bs.append(float(np.mean(powers > 0.0)))
+
+            ep_on_mean = float(np.mean(on_per_bs))
+
+            episode_throughput_mean.append(ep_thr_mean)
+            episode_fairness_last.append(ep_fair_last)
+            episode_on_ratio_mean.append(ep_on_mean)
+            episode_handover_ratio_mean.append(ep_ho_mean)
+            episode_served_ratio_mean.append(ep_served_mean)
+            episode_outage_ratio_mean.append(ep_outage_mean)
+            episode_reward_mean.append(ep_reward_mean_val)
+
+            on_str = " ".join([
+                f"BS{bs.bs_id}:{on_per_bs[i]:.3f}"
+                for i, bs in enumerate(self.env.base_stations)
+            ])
+
+            print(
+                f"[EVAL-EP END] Ep {ep+1:3d} | "
+                f"ThrMean:{ep_thr_mean:.3f} | "
+                f"Fair:{ep_fair_last:.3f} | "
+                f"ONMean:{ep_on_mean:.3f} ({on_str}) | "
+                f"HOmean:{ep_ho_mean:.4f}/{self.env.kappa:.4f} | "
+                f"Served:{ep_served_mean:.3f} | "
+                f"Outage:{ep_outage_mean:.3f}"
+            )  
+
+        # --------------------------------------------------
+        # Overall summary
+        # --------------------------------------------------f
+        print(f"\n{'='*84}")
+        print(" EVALUATION SUMMARY")
+        print(f"{'='*84}")
+        print(f"Mean throughput: {float(np.mean(episode_throughput_mean)):.4f}")
+        print(f"Mean fairness:   {float(np.mean(episode_fairness_last)):.4f}")
+        print(f"Mean ON ratio:   {float(np.mean(episode_on_ratio_mean)):.4f}")
+        print(f"Mean HO ratio:   {float(np.mean(episode_handover_ratio_mean)):.4f}")
+        print(f"{'='*84}\n")
 
         results = {
+            # slot-wise histories
             "throughput_history": throughput_history,
-            "fairness_history": fairness_history,
+            "fairness_block_history": fairness_block_history,
+            "fairness_block_x_history": fairness_block_x_history,
             "power_history": power_history,
             "slot_rates": slot_rates,
             "global_reward": global_reward_hist,
             "ue_per_user_reward": ue_per_user_reward_hist,
-            
+
             "handover_count_history": handover_count_history,
             "handover_ratio_history": handover_ratio_history,
 
@@ -715,6 +870,15 @@ class HAPPOTrainer:
             "Q_mean_history": Q_mean_history,
             "Z_mean_history": Z_mean_history,
             "G_mean_history": G_mean_history,
+
+            # episode-level summaries
+            "episode_throughput_mean": episode_throughput_mean,
+            "episode_fairness_last": episode_fairness_last,
+            "episode_on_ratio_mean": episode_on_ratio_mean,
+            "episode_handover_ratio_mean": episode_handover_ratio_mean,
+            "episode_served_ratio_mean": episode_served_ratio_mean,
+            "episode_outage_ratio_mean": episode_outage_ratio_mean,
+            "episode_reward_mean": episode_reward_mean,
         }
 
         if save_npz_path is not None:
@@ -728,11 +892,84 @@ class HAPPOTrainer:
     def save_results_npz(self, results: Dict, npz_path: str, tag: str = "run"):
         os.makedirs(os.path.dirname(npz_path) if os.path.dirname(npz_path) else ".", exist_ok=True)
 
+        tag = str(tag)
+
+        # =====================================================
+        # Common arrays
+        # =====================================================
+        global_reward = np.asarray(results.get("global_reward", []), dtype=np.float32)
+
+        Q_mean = np.asarray(results.get("Q_mean_history", []), dtype=np.float32)
+        Z_mean = np.asarray(results.get("Z_mean_history", []), dtype=np.float32)
+        G_mean = np.asarray(results.get("G_mean_history", []), dtype=np.float32)
+        G_max = np.asarray(results.get("G_max_history", []), dtype=np.float32)
+
+        update_steps = np.asarray(results.get("update_step_history", []), dtype=np.int32)
+        update_episodes = np.asarray(results.get("update_episode_history", []), dtype=np.int32)
+
+        critic_loss = np.asarray(results.get("critic_loss_history", []), dtype=np.float32)
+        actor_ue_loss = np.asarray(results.get("actor_ue_loss_history", []), dtype=np.float32)
+        actor_bs_loss = np.asarray(results.get("actor_bs_loss_history", []), dtype=np.float32)
+        entropy_ue = np.asarray(results.get("entropy_ue_history", []), dtype=np.float32)
+        entropy_bs = np.asarray(results.get("entropy_bs_history", []), dtype=np.float32)
+
+        # block average for reward plotting
+        reward_x_500, global_reward_500 = (
+            block_avg_1d(global_reward, 500)
+            if global_reward.size > 0 else
+            (np.asarray([], dtype=np.int32), np.asarray([], dtype=np.float32))
+        )
+
+        # =====================================================
+        # TRAIN SAVE: lightweight
+        # =====================================================
+        if tag == "train":
+            episode_reward = np.asarray(results.get("episode_reward_history", []), dtype=np.float32)
+            episode_Q_last = np.asarray(results.get("episode_Q_last_history", []), dtype=np.float32)
+            episode_Z_last = np.asarray(results.get("episode_Z_last_history", []), dtype=np.float32)
+            episode_G_last = np.asarray(results.get("episode_G_last_history", []), dtype=np.float32)
+
+            np.savez_compressed(
+                npz_path,
+                tag=tag,
+                n_users=int(self.env.n_agents),
+                n_bs=int(self.env.n_bs),
+
+                # reward / queue
+                global_reward=global_reward,
+                reward_x_500=reward_x_500,
+                global_reward_500=global_reward_500,
+
+                Q_mean=Q_mean,
+                Z_mean=Z_mean,
+                G_mean=G_mean,
+                G_max=G_max,
+
+                # episode summaries
+                episode_reward=episode_reward,
+                episode_Q_last=episode_Q_last,
+                episode_Z_last=episode_Z_last,
+                episode_G_last=episode_G_last,
+
+                # losses
+                update_steps=update_steps,
+                update_episodes=update_episodes,
+                critic_loss=critic_loss,
+                actor_ue_loss=actor_ue_loss,
+                actor_bs_loss=actor_bs_loss,
+                entropy_ue=entropy_ue,
+                entropy_bs=entropy_bs,
+            )
+            print(f"✅ Saved train npz: {npz_path}")
+            return
+        
+        # =====================================================
+        # EVAL SAVE: performance metrics
+        # =====================================================
         thr = np.asarray(results.get("throughput_history", []), dtype=np.float32)
-        fair = np.asarray(results.get("fairness_history", []), dtype=np.float32)
+        fair = np.asarray(results.get("fairness_block_history", []), dtype=np.float32)
         slot_rates = np.asarray(results.get("slot_rates", []), dtype=np.float32)
 
-        global_reward = np.asarray(results.get("global_reward", []), dtype=np.float32)
         ue_per_user = np.asarray(results.get("ue_per_user_reward", []), dtype=np.float32)
 
         handover_count = np.asarray(results.get("handover_count_history", []), dtype=np.float32)
@@ -741,16 +978,13 @@ class HAPPOTrainer:
         served_ratio = np.asarray(results.get("served_ratio_history", []), dtype=np.float32)
         outage_ratio = np.asarray(results.get("outage_ratio_history", []), dtype=np.float32)
 
-        Q_mean = np.asarray(results.get("Q_mean_history", []), dtype=np.float32)
-        Z_mean = np.asarray(results.get("Z_mean_history", []), dtype=np.float32)
-        G_mean = np.asarray(results.get("G_mean_history", []), dtype=np.float32)
-
-        update_steps = np.asarray(results.get("update_step_history", []), dtype=np.int32)
-        critic_loss = np.asarray(results.get("critic_loss_history", []), dtype=np.float32)
-        actor_ue_loss = np.asarray(results.get("actor_ue_loss_history", []), dtype=np.float32)
-        actor_bs_loss = np.asarray(results.get("actor_bs_loss_history", []), dtype=np.float32)
-        entropy_ue = np.asarray(results.get("entropy_ue_history", []), dtype=np.float32)
-        entropy_bs = np.asarray(results.get("entropy_bs_history", []), dtype=np.float32)
+        episode_throughput_mean = np.asarray(results.get("episode_throughput_mean", []), dtype=np.float32)
+        episode_fairness_last = np.asarray(results.get("episode_fairness_last", []), dtype=np.float32)
+        episode_on_ratio_mean = np.asarray(results.get("episode_on_ratio_mean", []), dtype=np.float32)
+        episode_handover_ratio_mean = np.asarray(results.get("episode_handover_ratio_mean", []), dtype=np.float32)
+        episode_served_ratio_mean = np.asarray(results.get("episode_served_ratio_mean", []), dtype=np.float32)
+        episode_outage_ratio_mean = np.asarray(results.get("episode_outage_ratio_mean", []), dtype=np.float32)
+        episode_reward_mean = np.asarray(results.get("episode_reward_mean", []), dtype=np.float32)
 
         if ue_per_user.ndim == 2 and ue_per_user.shape[0] > 0:
             mean_user_reward_step = ue_per_user.mean(axis=1).astype(np.float32)
@@ -760,15 +994,8 @@ class HAPPOTrainer:
             mean_user_reward_ma100 = np.asarray([], dtype=np.float32)
 
         # block average for reward plotting
-        block = 500
-        reward_x_500, global_reward_500 = (
-            block_avg_1d(global_reward, block)
-            if global_reward.size > 0 else
-            (np.asarray([], dtype=np.int32), np.asarray([], dtype=np.float32))
-        )
-
         user_reward_x_500, user_mean_reward_500 = (
-            block_avg_1d(mean_user_reward_step, block)
+            block_avg_1d(mean_user_reward_step, 500)
             if mean_user_reward_step.size > 0 else
             (np.asarray([], dtype=np.int32), np.asarray([], dtype=np.float32))
         )
@@ -872,66 +1099,66 @@ class HAPPOTrainer:
             n_users=int(self.env.n_agents),
             n_bs=int(self.env.n_bs),
 
+            # slot-wise performance
             throughput=thr,
             fairness=fair,
+            slot_rates=slot_rates,
+            power_mat=power_mat,
+            bs_ids=np.asarray(bs_ids_sorted, dtype=np.int32),
 
+            # reward
             global_reward=global_reward,
-            global_reward_step=global_reward,
             ue_per_user_reward=ue_per_user,
             mean_user_reward_step=mean_user_reward_step,
             mean_user_reward_ma100=mean_user_reward_ma100,
-
             reward_x_500=reward_x_500,
             global_reward_500=global_reward_500,
             user_reward_x_500=user_reward_x_500,
             user_mean_reward_500=user_mean_reward_500,
 
-            bs_ids=np.asarray(bs_ids_sorted, dtype=np.int32),
-            power_mat=power_mat,
-
-            # performance
+            # handover / QoE
             handover_count=handover_count,
             handover_ratio=handover_ratio,
             handover_ratio_mean=handover_ratio_mean,
+            served_ratio=served_ratio,
+            outage_ratio=outage_ratio,
 
+            # ON / energy constraint
             bs_on_ratio_per_bs=bs_on_ratio_per_bs,
             bs_on_ratio_mean=bs_on_ratio_mean,
-
-            # constraint
             energy_budget_ratio=energy_budget_ratio,
             energy_violation_per_bs=energy_violation_per_bs,
             energy_violation_mean=energy_violation_mean,
             energy_violation_ratio=energy_violation_ratio,
 
+            # handover constraint
             handover_budget_ratio=handover_budget_ratio,
             handover_violation_mean=handover_violation_mean,
             handover_violation_flag=handover_violation_flag,
 
-            # Eq. (11) objective
+            # queue
+            Q_mean=Q_mean,
+            Z_mean=Z_mean,
+            G_mean=G_mean,
+            G_max=G_max,
+
+            # episode-level evaluation summaries
+            episode_throughput_mean=episode_throughput_mean,
+            episode_fairness_last=episode_fairness_last,
+            episode_on_ratio_mean=episode_on_ratio_mean,
+            episode_handover_ratio_mean=episode_handover_ratio_mean,
+            episode_served_ratio_mean=episode_served_ratio_mean,
+            episode_outage_ratio_mean=episode_outage_ratio_mean,
+            episode_reward_mean=episode_reward_mean,
+
+            # objective
             lambda_E=np.asarray([lambda_E_value], dtype=np.float32),
-            slot_rates=slot_rates,
             avg_user_rates=avg_user_rates,
             energy_per_slot=energy_per_slot,
             pf_utility=pf_utility,
             avg_energy_cost=avg_energy_cost,
             ea_pf_utility=ea_pf_utility,
             performance_metric=ea_pf_utility,
-
-            # optional QoE
-            served_ratio=served_ratio,
-            outage_ratio=outage_ratio,
-
-            # queue
-            Q_mean=Q_mean,
-            Z_mean=Z_mean,
-            G_mean=G_mean,
-
-            # losses
-            update_steps=update_steps,
-            critic_loss=critic_loss,
-            actor_ue_loss=actor_ue_loss,
-            actor_bs_loss=actor_bs_loss,
-            entropy_ue=entropy_ue,
-            entropy_bs=entropy_bs,
         )
-        print(f"✅ Saved results npz: {npz_path}")
+
+        print(f"✅ Saved eval npz: {npz_path}")
