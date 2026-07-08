@@ -52,6 +52,11 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         self.mu_E_b = {bs.bs_id: 0.0 for bs in self.base_stations}
         self.nu_H_u = {u.ue_id: 0.0 for u in self.users}
 
+        self.mu_E_b_history = []
+        self.nu_H_u_history = []
+        self.C_E_b_history = []
+        self.C_H_u_history = []
+
         # Episode-level constraint statistics
         self.episode_on_hist = {
             bs.bs_id: []
@@ -324,6 +329,8 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         beta_mu_k = self.eta_mu / np.sqrt(self.episode_idx + 1)
         beta_nu_k = self.eta_nu / np.sqrt(self.episode_idx + 1)
 
+        C_E_list = []
+
         for bs in self.base_stations:
             bs_id = bs.bs_id
 
@@ -343,12 +350,15 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
                 budget = float(self.P_bar[bs_id])
 
             C_E = avg_cost - budget
+            C_E_list.append(C_E)
 
             self.mu_E_b[bs_id] = float(np.clip(
                 self.mu_E_b[bs_id] + beta_mu_k * C_E,
                 0.0,
                 self.mu_max,
             ))
+
+        C_H_list = []
 
         for u in self.users:
             ue_id = u.ue_id
@@ -359,12 +369,18 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
                 ho_ratio = float(np.mean(self.episode_ho_hist[ue_id]))
 
             C_H = ho_ratio - self.kappa
+            C_H_list.append(C_H)
 
             self.nu_H_u[ue_id] = float(np.clip(
                 self.nu_H_u[ue_id] + beta_nu_k * C_H,
                 0.0,
                 self.nu_max,
             ))
+
+        self.mu_E_b_history.append(np.array([self.mu_E_b[bs.bs_id] for bs in self.base_stations], dtype=np.float32))
+        self.nu_H_u_history.append(np.array([self.nu_H_u[u.ue_id] for u in self.users], dtype=np.float32))
+        self.C_E_b_history.append(np.array(C_E_list, dtype=np.float32))
+        self.C_H_u_history.append(np.array(C_H_list, dtype=np.float32))
 
         self.episode_idx += 1
 
