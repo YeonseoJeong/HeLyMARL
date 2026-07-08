@@ -2,7 +2,7 @@
 J-MARL baseline: both UE+BS agents, no Lyapunov virtual queues.
 
 UE obs   : [Rem_b for b, rate_b for b]           dim = 2*n_bs
-BS obs   : [Rem_b, score_1..score_K]             dim = 1 + bs_top_k  (same size as LyMARL)
+BS obs   : [Rem_b, score_1..score_K]             dim = 1 + bs_top_k  (same size as LyMARL), score = rate
 Global   : [rate_{u,b} for u,b; Rem_b for b]     dim = n_agents*n_bs + n_bs
 UE team reward : mean_u log(R_{u,a_u} + eps)
 BS reward      : (log(R+eps) - alpha_energy * P^tx) * I_b   (doc fixed energy penalty)

@@ -16,7 +16,7 @@ Two key formulation knobs (defaults set for stable learning, not for paper fidel
                               Why: gives continuous gradient pressure that scales with how
                               much the BS is currently over-spending, instead of a uniform
                               cost per ON slot.
-  - mu_max                  : projection upper bound (avoids primal-dual runaway).
+  - mu_max                  : projection upper bound (avoids primal-dual runaway).  0 <= mu_b <= mu_max
 
 See docs/additional_lagrangian_marl.md.
 """
