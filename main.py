@@ -60,10 +60,10 @@ def make_trainer(env):
 if __name__ == "__main__":
     seed = 0
     kappa_list = [0.03]
-    lambda_E = 15.0
+    lambda_E = 0.0
 
     steps_per_episode = 10000
-    train_episodes = 10
+    train_episodes = 5
     eval_episode = 1
     update_interval = 128
 
@@ -78,14 +78,14 @@ if __name__ == "__main__":
         train_npz_path = f"results/results_kappa/HeLyMARL_train_rewards_kappa_{kappa}.npz"
         model_path = f"results/results_kappa/HeLyMARL_model_kappa_{kappa}.pt"
 
-        # trainer_soft.train(
-        #     n_episodes=train_episodes,
-        #     steps_per_episode=steps_per_episode,
-        #     update_interval=update_interval,
-        #     save_npz_path=train_npz_path
-        # )
+        trainer_soft.train(
+            n_episodes=train_episodes,
+            steps_per_episode=steps_per_episode,
+            update_interval=update_interval,
+            save_npz_path=train_npz_path
+        )
 
-        # trainer_soft.save_model(model_path)
+        trainer_soft.save_model(model_path)
     
         print(f"\n=== Hard Eval with kappa = {kappa} ===")
 

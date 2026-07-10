@@ -25,6 +25,7 @@ def plot_train_reward_loss(
     save_dir=None,
     reward_smooth_window=1000,
     title_prefix="HeLyMARL",
+    compare_reward_npz_paths=None,
 ):
     data = np.load(npz_path)
 
@@ -37,41 +38,126 @@ def plot_train_reward_loss(
     # ======================================================
     # 1) Reward plot
     # ======================================================
-    if "reward_x_1000" in data and "global_reward_1000" in data and len(data["global_reward_1000"]) > 0:
-        reward_x = data["reward_x_1000"]
-        reward_y = data["global_reward_1000"]
-        reward_label = "Global reward (block avg 1000)"
-    elif "global_reward" in data and len(data["global_reward"]) > 0:
-        reward_raw = data["global_reward"]
-        reward_y = moving_avg(reward_raw, reward_smooth_window)
-        reward_x = np.arange(1, len(reward_y) + 1)
-        reward_label = f"Global reward (MA {reward_smooth_window})"
+    def _load_reward(npz_file):
+        d = np.load(npz_file)
+
+        if (
+            "reward_x_1000" in d
+            and "global_reward_1000" in d
+            and len(d["global_reward_1000"]) > 0
+        ):
+            x = np.asarray(d["reward_x_1000"], dtype=np.float32)
+            y = np.asarray(d["global_reward_1000"], dtype=np.float32)
+            label_suffix = "block avg 1000"
+
+        elif "global_reward" in d and len(d["global_reward"]) > 0:
+            raw = np.asarray(d["global_reward"], dtype=np.float32)
+            y = moving_avg(raw, reward_smooth_window)
+            x = np.arange(1, len(y) + 1)
+            label_suffix = f"MA {reward_smooth_window}"
+
+        else:
+            x, y, label_suffix = None, None, None
+
+        d.close()
+        return x, y, label_suffix
+
+        # ------------------------------------------------------
+    # Case A: compare multiple algorithms
+    # Normalized reward comparison
+    # compare_reward_npz_paths = {
+    #     "PF-HAPPO": "...npz",
+    #     "Jensen-HAPPO": "...npz",
+    #     "HeLyMARL": "...npz",
+    # }
+    # ------------------------------------------------------
+    if compare_reward_npz_paths is not None:
+
+        def _normalize(y):
+            y = np.asarray(y, dtype=np.float32)
+            if len(y) == 0:
+                return y
+
+            y_min = float(np.min(y))
+            y_max = float(np.max(y))
+
+            if y_max - y_min < 1e-8:
+                return np.zeros_like(y, dtype=np.float32)
+
+            return (y - y_min) / (y_max - y_min)
+
+        plt.figure(figsize=(8, 5))
+
+        plotted = False
+        for alg_name, alg_npz_path in compare_reward_npz_paths.items():
+            if not os.path.exists(alg_npz_path):
+                print(f"[Warning] File not found: {alg_npz_path}")
+                continue
+
+            reward_x, reward_y, label_suffix = _load_reward(alg_npz_path)
+
+            if reward_x is None:
+                print(f"[Warning] No reward data found: {alg_npz_path}")
+                continue
+
+            reward_y_norm = _normalize(reward_y)
+
+            plt.plot(
+                reward_x,
+                reward_y_norm,
+                linewidth=2.0,
+                label=f"{alg_name} ({label_suffix}, normalized)"
+            )
+            plotted = True
+
+        if plotted:
+            plt.xlabel("Training step")
+            plt.ylabel("Normalized reward")
+            plt.title(f"{title_prefix} Training Reward Comparison")
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.tight_layout()
+
+            reward_path = os.path.join(save_dir, f"{base}_reward_comparison_normalized.png")
+            plt.savefig(reward_path, dpi=300, bbox_inches="tight")
+            plt.close()
+            print(f"Saved normalized reward comparison plot: {reward_path}")
+        else:
+            plt.close()
+            print("[Warning] No reward data found for comparison.")
+
+    # ------------------------------------------------------
+    # Case B: original single algorithm reward plot
+    # ------------------------------------------------------
     else:
-        reward_x = None
-        reward_y = None
+        reward_x, reward_y, label_suffix = _load_reward(npz_path)
 
-    if reward_x is not None:
-        plt.figure(figsize=(7, 4.5))
-        plt.plot(reward_x, reward_y, linewidth=2.0, label=reward_label)
-        plt.xlabel("Training step")
-        plt.ylabel("Reward")
-        plt.title(f"{title_prefix} Training Reward")
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        plt.tight_layout()
+        if reward_x is not None:
+            plt.figure(figsize=(7, 4.5))
+            plt.plot(
+                reward_x,
+                reward_y,
+                linewidth=2.0,
+                label=f"Global reward ({label_suffix})"
+            )
+            plt.xlabel("Training step")
+            plt.ylabel("Reward")
+            plt.title(f"{title_prefix} Training Reward")
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.tight_layout()
 
-        reward_path = os.path.join(save_dir, f"{base}_reward.png")
-        plt.savefig(reward_path, dpi=300, bbox_inches="tight")
-        plt.close()
-        print(f"Saved reward plot: {reward_path}")
-    else:
-        print("[Warning] No reward data found.")
-
+            reward_path = os.path.join(save_dir, f"{base}_reward.png")
+            plt.savefig(reward_path, dpi=300, bbox_inches="tight")
+            plt.close()
+            print(f"Saved reward plot: {reward_path}")
+        else:
+            print("[Warning] No reward data found.")
     # ======================================================
     # 2) Critic loss plot
     # ======================================================
     update_steps = data["update_steps"] if "update_steps" in data else None
-    max_step = 10000
+    max_step = 50000
 
     if "critic_loss" in data and len(data["critic_loss"]) > 0:
         critic_loss = np.asarray(data["critic_loss"], dtype=np.float32)
@@ -199,5 +285,10 @@ if __name__ == "__main__":
     plot_train_reward_loss(
         npz_path="results/results_kappa/HeLyMARL_train_rewards_kappa_0.03.npz",
         save_dir="results/results_kappa/plots",
-        title_prefix="HeLyMARL kappa=0.03"
+        title_prefix="HeLyMARL kappa=0.03",
+        compare_reward_npz_paths={
+            "PF-HAPPO": "results/results_baselines/ConstrainedHAPPO_pf_train_rewards_kappa_0.03.npz",
+            "Jensen-HAPPO": "results/results_baselines/ConstrainedHAPPO_jensen_train_rewards_kappa_0.03.npz",
+            "HeLyMARL": "results/results_kappa/HeLyMARL_train_rewards_kappa_0.03.npz",
+        },  
     )

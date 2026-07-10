@@ -1,3 +1,13 @@
+import os
+import sys
+
+# DDPP.py가 있는 baselines 폴더의 상위 폴더를 Python 경로에 추가
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
+
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import List
@@ -360,6 +370,66 @@ class DDPPAlgorithm:
 
         return float((sum_rates ** 2) / (n_users * sum_squared))
     
+    def compute_block_jain_fairness(
+            self,
+            slot_rates,
+            block_size: int = 1000,
+            eps: float = 1e-12,
+        ):
+        rates = np.asarray(slot_rates, dtype=np.float32)
+
+        if rates.ndim != 2 or rates.shape[0] == 0:
+            return (
+                0.0,
+                np.asarray([], dtype=np.float32),
+                np.asarray([], dtype=np.int32),
+            )
+
+        T, U = rates.shape
+
+        block_jfis = []
+        block_x = []
+
+        for start in range(0, T, block_size):
+            block = rates[start:start + block_size]
+
+            if block.shape[0] == 0:
+                continue
+
+            # 각 block에서 사용자별 평균 rate
+            avg_user_rates = block.mean(axis=0)
+
+            sum_rates = float(avg_user_rates.sum())
+            sum_squared = float(np.sum(avg_user_rates ** 2))
+
+            if sum_squared < eps:
+                jfi = 0.0
+            else:
+                jfi = (sum_rates ** 2) / (
+                    U * sum_squared + eps
+                )
+
+            block_jfis.append(float(jfi))
+            block_x.append(start + block.shape[0])
+
+        block_jfis = np.asarray(
+            block_jfis,
+            dtype=np.float32,
+        )
+
+        block_x = np.asarray(
+            block_x,
+            dtype=np.int32,
+        )
+
+        mean_block_jfi = (
+            float(block_jfis.mean())
+            if block_jfis.size > 0
+            else 0.0
+        )
+
+        return mean_block_jfi, block_jfis, block_x
+    
     # ==========================================
     # Simulation
     # ==========================================
@@ -414,7 +484,7 @@ class DDPPAlgorithm:
         self.handover_ratio_history.append(handover_count / max(1, len(self.users)))
         self.G_mean_history.append(np.mean(list(self.G_u.values())))
         self.slot_rates.append([actual_rates.get(u.ue_id, 0.0) for u in self.users])
-        self.fairness_history.append(self.calculate_jain_fairness(window=100))
+        # self.fairness_history.append(self.calculate_jain_fairness(window=100))
 
     def run_simulation(self):
         print(f"\n{'='*60}")
@@ -425,7 +495,7 @@ class DDPPAlgorithm:
         print(f"  Lambda E = {self.lambda_E}")
         print(f"  Total slots = {self.max_slots}")
         print(f"{'='*60}\n")
-        self.recent_fair_list = []
+        # self.recent_fair_list = []
 
         for t in range(self.max_slots):
 
@@ -435,20 +505,22 @@ class DDPPAlgorithm:
                 print(f"[DDPP] t={t:6d} | V={self.V} | lambda_E={self.lambda_E}")
             self.run_slot(t)
             
-            if (t + 1) % 100 == 0:
-                recent_thr = float(np.mean(self.throughput_history[-100:]))
-                recent_fair = float(self.calculate_jain_fairness(window=100))
-                if not np.isnan(recent_fair):
-                    self.recent_fair_list.append(recent_fair)
+            if (t + 1) % 1000 == 0:
+                recent_block = np.asarray(self.slot_rates[-1000:], dtype=np.float32)
+                recent_fair, _, _ = self.compute_block_jain_fairness(recent_block, block_size=1000)
+                recent_thr = float(np.mean(self.throughput_history[-1000:]))
+                # recent_fair = float(self.calculate_jain_fairness(window=100))
+                # if not np.isnan(recent_fair):
+                    # self.recent_fair_list.append(recent_fair)
 
                 on_ratios = {}
                 for bs in self.base_stations:
-                    on_count = sum(1 for s in self.bs_status_history[-100:] if s.get(bs.bs_id, 0) == 1)
-                    on_ratios[bs.bs_id] = on_count / 100
+                    on_count = sum(1 for s in self.bs_status_history[-1000:] if s.get(bs.bs_id, 0) == 1)
+                    on_ratios[bs.bs_id] = on_count / 1000
 
                 ratio_str = ', '.join([f'BS{b}:{r:.2f}' for b, r in on_ratios.items()])
-                ho_count_100 = float(np.mean(self.handover_count_history[-100:]))
-                ho_ratio_100 = float(np.mean(self.handover_ratio_history[-100:]))
+                ho_count_block = float(np.mean(self.handover_count_history[-1000:]))
+                ho_ratio_block = float(np.mean(self.handover_ratio_history[-1000:]))
 
                 Q_vals = np.array(list(self.Q_u.values()), dtype=float)
                 Z_vals = np.array(list(self.Z_b.values()), dtype=float)
@@ -456,16 +528,24 @@ class DDPPAlgorithm:
 
                 fair_str = "nan" if np.isnan(recent_fair) else f"{recent_fair:.3f}"
                 print(f"Slot {t+1:4d} | Thr: {recent_thr:.3f} Gbps | "
-                    f"Fair(JFI@100): {fair_str} | ON: [{ratio_str}] | "
-                    f"HO(100): count={ho_count_100:.3f} ratio={ho_ratio_100:.4f}/{self.kappa:.4f} | "
+                    f"Fair(JFI@1000): {fair_str} | ON: [{ratio_str}] | "
+                    f"HO(1000): count={ho_count_block:.3f} ratio={ho_ratio_block:.4f}/{self.kappa:.4f} | "
                     f"Q mean/max: {np.mean(Q_vals):5.3f}/{np.max(Q_vals):5.3f} | "
                     f"Z mean/max: {np.mean(Z_vals):5.3f}/{np.max(Z_vals):5.3f} | "
                     f"G mean/max: {np.mean(G_vals):5.3f}/{np.max(G_vals):5.3f}")                  
         print(f"\n{'='*60}")
         overall_thr = float(np.mean(self.throughput_history))
-        overall_fair = float(np.nanmean(self.recent_fair_list)) if len(self.recent_fair_list) > 0 else np.nan  # ep 전체 슬롯 기준 JFI
+        # overall_fair = float(np.nanmean(self.recent_fair_list)) if len(self.recent_fair_list) > 0 else np.nan  # ep 전체 슬롯 기준 JFI
+        overall_fair, block_jfis, block_x = (
+            self.compute_block_jain_fairness(
+                self.slot_rates,
+                block_size=1000,
+            )
+        )
+
         print(f"  Avg Throughput: {overall_thr:.3f} Gbps")
-        print(f"  JFI (avg over 100 slots): {overall_fair:.4f}")
+        print(f"  Mean block JFI (block=1000): {overall_fair:.4f}")
+        print(f"  Block JFIs: {block_jfis}")
 
         print(f"\n  Power Budget Check:")
         for bs in self.base_stations:
@@ -645,7 +725,9 @@ class DDPPAlgorithm:
         os.makedirs(os.path.dirname(npz_path) if os.path.dirname(npz_path) else ".", exist_ok=True)
 
         throughput = np.asarray(self.throughput_history, dtype=np.float32)
-        fairness = np.asarray(self.fairness_history, dtype=np.float32)
+        # fairness = np.asarray(self.fairness_history, dtype=np.float32)
+        mean_block_jfi, block_jfis, block_x = self.compute_block_jain_fairness(self.slot_rates, block_size=1000)
+        fairness = np.asarray([mean_block_jfi], dtype=np.float32)
         handover_ratio_all = np.asarray(self.handover_ratio_history, dtype=np.float32)
         handover_count_all = np.asarray(self.handover_count_history, dtype=np.float32)
 
@@ -672,6 +754,18 @@ class DDPPAlgorithm:
             bs_on_ratio_mean = np.asarray([np.nan], dtype=np.float32)
             handover_ratio = np.asarray([], dtype=np.float32)
             handover_count = np.asarray([], dtype=np.float32)
+
+        # HO mean: 현재 저장되는 handover_ratio 배열의 평균
+        if handover_ratio.size > 0:
+            handover_ratio_mean = np.asarray(
+                [float(np.nanmean(handover_ratio))],
+                dtype=np.float32,
+            )
+        else:
+            handover_ratio_mean = np.asarray(
+                [np.nan],
+                dtype=np.float32,
+            )
 
         # Queue mean trajectories
         T = len(throughput)
@@ -725,7 +819,10 @@ class DDPPAlgorithm:
             n_bs=int(len(self.base_stations)),
 
             throughput=throughput,
-            fairness=fairness,
+            fairness=fairness, # 최종 평균 block jfi
+            fairness_block_jfis=block_jfis, # 1000-slot block별 jfi
+            fairness_block_x=block_x, # 1000-slot block별 x축
+            fairness_block_size = np.asarray([1000], dtype=np.int32),
 
             power_mat=power_mat,
             bs_ids=np.asarray(bs_ids, dtype=np.int32),
@@ -733,6 +830,7 @@ class DDPPAlgorithm:
             bs_on_ratio_mean=bs_on_ratio_mean,
 
             handover_ratio=handover_ratio,
+            handover_ratio_mean=handover_ratio_mean,
             handover_count=handover_count,
             handover_budget_ratio=np.asarray([float(self.kappa)], dtype=np.float32),
             energy_budget_ratio=np.asarray([float(self.power_budget_ratio)], dtype=np.float32),
@@ -792,8 +890,8 @@ def sample_users_near_bs_boundaries(
 if __name__ == "__main__":
     area_size = 100
     num_users = 20
-    max_slots = 30000
-    lambda_list = [5.0, 10.0, 15.0, 20.0]
+    max_slots = 10000
+    lambda_list = [0]
 
     for lambda_E in lambda_list:
         print(f"\n{'='*80}")
@@ -828,4 +926,4 @@ if __name__ == "__main__":
         )
         dpp.run_simulation()
         # dpp.plot_results()
-        dpp.save_results_npz(f"results_compare/DDPP_eval_lambda_{lambda_E}.npz", tag=f"DDPP_{lambda_E}")
+        dpp.save_results_npz(f"results/results_compare/DDPP_eval_lambda_{lambda_E}.npz", tag=f"DDPP_{lambda_E}")

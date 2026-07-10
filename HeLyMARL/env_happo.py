@@ -54,11 +54,17 @@ class HAPPOEnvironment:
         self.P_max = {bs.bs_id: 10 ** (bs.tx_power_dbm / 10) / 1000 for bs in self.base_stations}
         self.P_bar = {bs.bs_id: self.power_budget_ratio * self.P_max[bs.bs_id] for bs in self.base_stations}
 
-        # Hard constraint allowance:
+        # inference hard constraint action masking:
         # each BS can be ON at most power_budget_ratio * hard_window_len times per window
         self.hard_on_limit = {
             bs.bs_id: int(np.floor(self.power_budget_ratio * self.hard_window_len))
             for bs in self.base_stations
+        }
+
+        # each UE can handover at most kappa * (hard_window_len - 1) times per window
+        self.hard_ho_limit = {
+            u.ue_id: int(np.floor(self.kappa * max(1, self.hard_window_len - 1)))
+            for u in self.users
         }
 
         # Queues
@@ -84,8 +90,8 @@ class HAPPOEnvironment:
         self.timestep = 0
 
         # UE action: [BS0..BS(n_bs-1)]
-        #self.no_request_action = self.n_bs
-        self.action_dim = self.n_bs
+        # self.no_request_action = self.n_bs
+        self.action_dim = self.n_bs 
 
         # BS action: Top-K candidates + 0: inactive
         self.bs_action_dim = self.bs_top_k + 1
@@ -102,6 +108,7 @@ class HAPPOEnvironment:
 
         # Hard window usage
         self.bs_on_used_in_window = {bs.bs_id: 0 for bs in self.base_stations}
+        self.ue_ho_used_in_window = {u.ue_id: 0 for u in self.users}
         self.window_step = 0
 
         # Fast lookup maps
@@ -162,6 +169,7 @@ class HAPPOEnvironment:
         self.prev_power = {bs.bs_id: 0.0 for bs in self.base_stations}
 
         self.bs_on_used_in_window = {bs.bs_id: 0 for bs in self.base_stations}
+        self.ue_ho_used_in_window = {u.ue_id: 0 for u in self.users}
         self.window_step = 0
 
         self.update_max_rates()
@@ -404,17 +412,34 @@ class HAPPOEnvironment:
     # =========================================================
     def _get_action_mask(self, ue_id: int) -> np.ndarray:
         """
-        mask length = n_bs
-        [0..n_bs-1]: selectable BSs based on coverage
+        UE action:
+            0 ~ n_bs-1 : request BS
+        Hard HO mask:
+            If HO budget is exhausted, only previous serving BS is allowed.
         """
         user = self.user_map[ue_id]
         mask = np.zeros(self.action_dim, dtype=bool)
 
+        # 1) coverage mask: all True
         for i, bs in enumerate(self.base_stations):
             mask[i] = bool(bs.can_serve(user.position))
 
-        if not mask[:self.n_bs].any():
-            self.no_coverage_count += 1
+        # 2) handover limit
+        if self.use_hard_constraint:
+            used_ho = int(self.ue_ho_used_in_window.get(ue_id, 0))
+            limit_ho = int(self.hard_ho_limit.get(ue_id, 0))
+            prev_bs =int(self.m_u.get(ue_id, 0))
+
+            # 이전 serving BS가 있고, HO budget을 다 썼으면
+            # 이전 BS만 request 가능
+            if used_ho >= limit_ho and prev_bs != 0:
+                mask[:] = False
+                if prev_bs in self.bs_id_to_index:
+                    prev_i = self.bs_id_to_index[prev_bs]
+                    mask[prev_i] = True
+
+        if not mask.any():
+            mask[:] = True
 
         return mask
 
@@ -433,6 +458,7 @@ class HAPPOEnvironment:
 
         for ue_id, a in ue_actions.items():
             a = int(a)
+
             if not (0 <= a < self.n_bs):
                 continue
 
@@ -495,11 +521,13 @@ class HAPPOEnvironment:
     def step_joint(self, ue_actions: Dict[int, int], bs_actions: Dict[int, int], cand_lists: List[List[int]]):
         bs_requests = {bs.bs_id: [] for bs in self.base_stations}
 
-        for ue_id, action in ue_actions.items():
-            action = int(action)
-            assert 0 <= action < self.action_dim, f"Invalid UE action {action}"
+        for ue_id, a in ue_actions.items():
+            a = int(a)
 
-            bs_id = self.base_stations[action].bs_id
+            if not (0 <= a < self.n_bs):
+                continue
+
+            bs_id = self.base_stations[a].bs_id
             bs_requests[bs_id].append(ue_id)
 
         # Congestion logging
@@ -586,9 +614,14 @@ class HAPPOEnvironment:
         for bs in self.base_stations:
             if power_consumed[bs.bs_id] > 0.0:
                 self.bs_on_used_in_window[bs.bs_id] += 1
+        
+        for u in self.users:
+            if float(handover_u[u.ue_id]) > 0.0:
+                self.ue_ho_used_in_window[u.ue_id] += 1
 
         if self.window_step % self.hard_window_len == 0:
             self.bs_on_used_in_window = {bs.bs_id: 0 for bs in self.base_stations}
+            self.ue_ho_used_in_window = {u.ue_id: 0 for u in self.users}
 
         # ON history
         for bs in self.base_stations:
@@ -682,12 +715,14 @@ class HAPPOEnvironment:
 
             "no_coverage_count": int(self.no_coverage_count),
             "bs_on_used_in_window": self.bs_on_used_in_window.copy(),
+            "ue_ho_used_in_window": self.ue_ho_used_in_window.copy(),
             "window_step": int(self.window_step),
             "on_feats": on_feats,
             "rho": float(rho),
 
             "hard_constraint_enabled": bool(self.use_hard_constraint),
             "hard_on_limit": self.hard_on_limit.copy(),
+            "hard_ho_limit": self.hard_ho_limit.copy(),
         }
 
         done = False

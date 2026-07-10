@@ -439,11 +439,25 @@ class HAPPOTrainer:
         G_mean_history = []
         G_max_history = []
 
+        mu_E_mean_history = []
+        nu_H_mean_history = []
+        RemE_mean_history = []
+        RemH_mean_history = []
+        C_E_mean_history = []
+        C_H_mean_history = []
+
         # optional: episode-level summaries
         episode_reward_history = []
         episode_Q_last_history = []
         episode_Z_last_history = []
         episode_G_last_history = []
+
+        episode_mu_E_last_history = []
+        episode_nu_H_last_history = []
+        episode_RemE_last_history = []
+        episode_RemH_last_history = []
+        episode_C_E_last_history = []
+        episode_C_H_last_history = []
 
         global_step = 0
 
@@ -472,16 +486,26 @@ class HAPPOTrainer:
 
                 reward = float(info["global_reward"])
                 ep_reward_sum += reward
-
-                Q_vals = list(info["Q_u"].values())
-                Z_vals = list(info["Z_b"].values())
-                G_vals = list(info["G_u"].values())
-
                 global_reward_history.append(reward)
-                Q_mean_history.append(np.mean(Q_vals))
-                Z_mean_history.append(np.mean(Z_vals))
-                G_mean_history.append(np.mean(G_vals))
-                G_max_history.append(np.max(G_vals))
+
+                if self._is_constrained_env():
+                    cstats = self._get_constrained_log_stats()
+
+                    mu_E_mean_history.append(cstats["mu_E_mean"])
+                    nu_H_mean_history.append(cstats["nu_H_mean"])
+                    RemE_mean_history.append(cstats["RemE_mean"])
+                    RemH_mean_history.append(cstats["RemH_mean"])
+                    C_E_mean_history.append(cstats["C_E_mean"])
+                    C_H_mean_history.append(cstats["C_H_mean"])
+                else:
+                    Q_vals = list(info["Q_u"].values())
+                    Z_vals = list(info["Z_b"].values())
+                    G_vals = list(info["G_u"].values())
+
+                    Q_mean_history.append(np.mean(Q_vals))
+                    Z_mean_history.append(np.mean(Z_vals))
+                    G_mean_history.append(np.mean(G_vals))
+                    G_max_history.append(np.max(G_vals))
 
                 # episode 마지막에서만 done=True
                 done_to_store = bool(done or (ep_step == steps_per_episode - 1))
@@ -545,15 +569,28 @@ class HAPPOTrainer:
                 # --------------------------------------------------
                 if global_step % 1000 == 0:
                     recent_reward = float(np.mean(global_reward_history[-1000:]))
-                    print(
-                        f"Ep {ep+1:4d} | "
-                        f"GlobalStep {global_step:7d} | "
-                        f"Reward(1k): {recent_reward:.3f} | "
-                        f"Qmean:{Q_mean_history[-1]:.3f} | "
-                        f"Zmean:{Z_mean_history[-1]:.3f} | "
-                        f"Gmean:{G_mean_history[-1]:.3f} | "
-                        f"Gmax:{G_max_history[-1]:.3f}"
-                    )
+                    if self._is_constrained_env():
+                        print(
+                            f"Ep {ep+1:4d} | "
+                            f"GlobalStep {global_step:7d} | "
+                            f"Reward(1k): {recent_reward:.3f} | "
+                            f"muE:{mu_E_mean_history[-1]:.3f} | "
+                            f"nuH:{nu_H_mean_history[-1]:.3f} | "
+                            f"RemE:{RemE_mean_history[-1]:.3f} | "
+                            f"RemH:{RemH_mean_history[-1]:.3f} | "
+                            f"CE:{C_E_mean_history[-1]:.4f} | "
+                            f"CH:{C_H_mean_history[-1]:.4f}"
+                        )
+                    else:
+                        print(
+                            f"Ep {ep+1:4d} | "
+                            f"GlobalStep {global_step:7d} | "
+                            f"Reward(1k): {recent_reward:.3f} | "
+                            f"Qmean:{Q_mean_history[-1]:.3f} | "
+                            f"Zmean:{Z_mean_history[-1]:.3f} | "
+                            f"Gmean:{G_mean_history[-1]:.3f} | "
+                            f"Gmax:{G_max_history[-1]:.3f}"
+                        )
 
             # --------------------------------------------------
             # Episode summary
@@ -561,31 +598,42 @@ class HAPPOTrainer:
             # 다음 episode 시작에서 reset됨.
             # --------------------------------------------------
             episode_reward_history.append(float(ep_reward_sum / max(1, steps_per_episode)))
-            episode_Q_last_history.append(float(Q_mean_history[-1]))
-            episode_Z_last_history.append(float(Z_mean_history[-1]))
-            episode_G_last_history.append(float(G_mean_history[-1]))
+            
+            if self._is_constrained_env():
+                episode_mu_E_last_history.append(float(mu_E_mean_history[-1]))
+                episode_nu_H_last_history.append(float(nu_H_mean_history[-1]))
+                episode_RemE_last_history.append(float(RemE_mean_history[-1]))
+                episode_RemH_last_history.append(float(RemH_mean_history[-1]))
+                episode_C_E_last_history.append(float(C_E_mean_history[-1]))
+                episode_C_H_last_history.append(float(C_H_mean_history[-1]))
 
-            print(
-                f"[EP END] Ep {ep+1:4d} | "
-                f"AvgReward:{episode_reward_history[-1]:.3f} | "
-                f"Last Qmean:{episode_Q_last_history[-1]:.3f} | "
-                f"Last Zmean:{episode_Z_last_history[-1]:.3f} | "
-                f"Last Gmean:{episode_G_last_history[-1]:.3f}"
-            )       
+                print(
+                    f"[EP END] Ep {ep+1:4d} | "
+                    f"AvgReward:{episode_reward_history[-1]:.3f} | "
+                    f"muE:{episode_mu_E_last_history[-1]:.3f} | "
+                    f"nuH:{episode_nu_H_last_history[-1]:.3f} | "
+                    f"RemE:{episode_RemE_last_history[-1]:.3f} | "
+                    f"RemH:{episode_RemH_last_history[-1]:.3f} | "
+                    f"CE:{episode_C_E_last_history[-1]:.4f} | "
+                    f"CH:{episode_C_H_last_history[-1]:.4f}"
+                )
+            
+            else:
+                episode_Q_last_history.append(float(Q_mean_history[-1]))
+                episode_Z_last_history.append(float(Z_mean_history[-1]))
+                episode_G_last_history.append(float(G_mean_history[-1]))
+
+                print(
+                    f"[EP END] Ep {ep+1:4d} | "
+                    f"AvgReward:{episode_reward_history[-1]:.3f} | "
+                    f"Last Qmean:{episode_Q_last_history[-1]:.3f} | "
+                    f"Last Zmean:{episode_Z_last_history[-1]:.3f} | "
+                    f"Last Gmean:{episode_G_last_history[-1]:.3f}"
+                )       
 
         results = {
             # reward / queue
             "global_reward": global_reward_history,
-            "Q_mean_history": Q_mean_history,
-            "Z_mean_history": Z_mean_history,
-            "G_mean_history": G_mean_history,
-            "G_max_history": G_max_history,
-
-            # episode summaries
-            "episode_reward_history": episode_reward_history,
-            "episode_Q_last_history": episode_Q_last_history,
-            "episode_Z_last_history": episode_Z_last_history,
-            "episode_G_last_history": episode_G_last_history,
 
             # loss curves
             "update_step_history": update_step_history,
@@ -595,7 +643,38 @@ class HAPPOTrainer:
             "actor_bs_loss_history": actor_bs_loss_history,
             "entropy_ue_history": entropy_ue_history,
             "entropy_bs_history": entropy_bs_history,
+
+            "episode_reward_history": episode_reward_history,
         }
+        if self._is_constrained_env():
+            results.update({
+                "mu_E_mean_history": mu_E_mean_history,
+                "nu_H_mean_history": nu_H_mean_history,
+                "RemE_mean_history": RemE_mean_history,
+                "RemH_mean_history": RemH_mean_history,
+                "C_E_mean_history": C_E_mean_history,
+                "C_H_mean_history": C_H_mean_history,
+
+                "episode_mu_E_last_history": episode_mu_E_last_history,
+                "episode_nu_H_last_history": episode_nu_H_last_history,
+                "episode_RemE_last_history": episode_RemE_last_history,
+                "episode_RemH_last_history": episode_RemH_last_history,
+                "episode_C_E_last_history": episode_C_E_last_history,
+                "episode_C_H_last_history": episode_C_H_last_history,
+            })
+        else:
+            results.update({
+            "Q_mean_history": Q_mean_history,
+            "Z_mean_history": Z_mean_history,
+            "G_mean_history": G_mean_history,
+            "G_max_history": G_max_history,
+
+            # episode summaries
+            
+            "episode_Q_last_history": episode_Q_last_history,
+            "episode_Z_last_history": episode_Z_last_history,
+            "episode_G_last_history": episode_G_last_history,
+        })
 
         if save_npz_path is not None:
             self.save_results_npz(results, save_npz_path, tag="train")
@@ -893,6 +972,10 @@ class HAPPOTrainer:
         os.makedirs(os.path.dirname(npz_path) if os.path.dirname(npz_path) else ".", exist_ok=True)
 
         tag = str(tag)
+        is_constrained = (
+            "mu_E_mean_history" in results
+            or hasattr(self.env, "mu_E_b")
+        )
 
         # =====================================================
         # Common arrays
@@ -925,43 +1008,93 @@ class HAPPOTrainer:
         # =====================================================
         if tag == "train":
             episode_reward = np.asarray(results.get("episode_reward_history", []), dtype=np.float32)
-            episode_Q_last = np.asarray(results.get("episode_Q_last_history", []), dtype=np.float32)
-            episode_Z_last = np.asarray(results.get("episode_Z_last_history", []), dtype=np.float32)
-            episode_G_last = np.asarray(results.get("episode_G_last_history", []), dtype=np.float32)
 
-            np.savez_compressed(
-                npz_path,
-                tag=tag,
-                n_users=int(self.env.n_agents),
-                n_bs=int(self.env.n_bs),
+            if is_constrained:
+                mu_E_mean = np.asarray(results.get("mu_E_mean_history", []), dtype=np.float32)
+                nu_H_mean = np.asarray(results.get("nu_H_mean_history", []), dtype=np.float32)
+                RemE_mean = np.asarray(results.get("RemE_mean_history", []), dtype=np.float32)
+                RemH_mean = np.asarray(results.get("RemH_mean_history", []), dtype=np.float32)
+                C_E_mean = np.asarray(results.get("C_E_mean_history", []), dtype=np.float32)
+                C_H_mean = np.asarray(results.get("C_H_mean_history", []), dtype=np.float32)
 
-                # reward / queue
-                global_reward=global_reward,
-                reward_x_500=reward_x_500,
-                global_reward_500=global_reward_500,
+                episode_mu_E_last = np.asarray(results.get("episode_mu_E_last_history", []), dtype=np.float32)
+                episode_nu_H_last = np.asarray(results.get("episode_nu_H_last_history", []), dtype=np.float32)
+                episode_RemE_last = np.asarray(results.get("episode_RemE_last_history", []), dtype=np.float32)
+                episode_RemH_last = np.asarray(results.get("episode_RemH_last_history", []), dtype=np.float32)
+                episode_C_E_last = np.asarray(results.get("episode_C_E_last_history", []), dtype=np.float32)
+                episode_C_H_last = np.asarray(results.get("episode_C_H_last_history", []), dtype=np.float32)
 
-                Q_mean=Q_mean,
-                Z_mean=Z_mean,
-                G_mean=G_mean,
-                G_max=G_max,
+                np.savez_compressed(
+                    npz_path,
+                    tag=tag,
+                    n_users=int(self.env.n_agents),
+                    n_bs=int(self.env.n_bs),
 
-                # episode summaries
-                episode_reward=episode_reward,
-                episode_Q_last=episode_Q_last,
-                episode_Z_last=episode_Z_last,
-                episode_G_last=episode_G_last,
+                    global_reward=global_reward,
+                    reward_x_500=reward_x_500,
+                    global_reward_500=global_reward_500,
 
-                # losses
-                update_steps=update_steps,
-                update_episodes=update_episodes,
-                critic_loss=critic_loss,
-                actor_ue_loss=actor_ue_loss,
-                actor_bs_loss=actor_bs_loss,
-                entropy_ue=entropy_ue,
-                entropy_bs=entropy_bs,
-            )
-            print(f"✅ Saved train npz: {npz_path}")
-            return
+                    mu_E_mean=mu_E_mean,
+                    nu_H_mean=nu_H_mean,
+                    RemE_mean=RemE_mean,
+                    RemH_mean=RemH_mean,
+                    C_E_mean=C_E_mean,
+                    C_H_mean=C_H_mean,
+
+                    episode_reward=episode_reward,
+                    episode_mu_E_last=episode_mu_E_last,
+                    episode_nu_H_last=episode_nu_H_last,
+                    episode_RemE_last=episode_RemE_last,
+                    episode_RemH_last=episode_RemH_last,
+                    episode_C_E_last=episode_C_E_last,
+                    episode_C_H_last=episode_C_H_last,
+
+                    update_steps=update_steps,
+                    update_episodes=update_episodes,
+                    critic_loss=critic_loss,
+                    actor_ue_loss=actor_ue_loss,
+                    actor_bs_loss=actor_bs_loss,
+                    entropy_ue=entropy_ue,
+                    entropy_bs=entropy_bs,
+                )
+                print(f"✅ Saved constrained train npz: {npz_path}")
+                return
+
+            else:
+                episode_Q_last = np.asarray(results.get("episode_Q_last_history", []), dtype=np.float32)
+                episode_Z_last = np.asarray(results.get("episode_Z_last_history", []), dtype=np.float32)
+                episode_G_last = np.asarray(results.get("episode_G_last_history", []), dtype=np.float32)
+
+                np.savez_compressed(
+                    npz_path,
+                    tag=tag,
+                    n_users=int(self.env.n_agents),
+                    n_bs=int(self.env.n_bs),
+
+                    global_reward=global_reward,
+                    reward_x_500=reward_x_500,
+                    global_reward_500=global_reward_500,
+
+                    Q_mean=Q_mean,
+                    Z_mean=Z_mean,
+                    G_mean=G_mean,
+                    G_max=G_max,
+
+                    episode_reward=episode_reward,
+                    episode_Q_last=episode_Q_last,
+                    episode_Z_last=episode_Z_last,
+                    episode_G_last=episode_G_last,
+
+                    update_steps=update_steps,
+                    update_episodes=update_episodes,
+                    critic_loss=critic_loss,
+                    actor_ue_loss=actor_ue_loss,
+                    actor_bs_loss=actor_bs_loss,
+                    entropy_ue=entropy_ue,
+                    entropy_bs=entropy_bs,
+                )
+                print(f"✅ Saved train npz: {npz_path}")
+                return
         
         # =====================================================
         # EVAL SAVE: performance metrics
@@ -1162,3 +1295,42 @@ class HAPPOTrainer:
         )
 
         print(f"✅ Saved eval npz: {npz_path}")
+
+    # helpers
+    def _is_constrained_env(self) -> bool:
+        return hasattr(self.env, "mu_E_b") and hasattr(self.env, "nu_H_u")
+    
+    def _get_constrained_log_stats(self):
+        mu_vals = list(getattr(self.env, "mu_E_b", {}).values())
+        nu_vals = list(getattr(self.env, "nu_H_u", {}).values())
+
+        rem_e_vals = [
+            self.env._remaining_energy_ratio(bs.bs_id)
+            for bs in self.env.base_stations
+        ]
+
+        rem_h_vals = [
+            self.env._remaining_handover_ratio(u.ue_id)
+            for u in self.env.users
+        ]
+
+        # Last episode-level violation.
+        # 아직 dual update 전이면 0.0으로 둠.
+        if len(getattr(self.env, "C_E_b_history", [])) > 0:
+            C_E_mean = float(np.mean(self.env.C_E_b_history[-1]))
+        else:
+            C_E_mean = 0.0
+
+        if len(getattr(self.env, "C_H_u_history", [])) > 0:
+            C_H_mean = float(np.mean(self.env.C_H_u_history[-1]))
+        else:
+            C_H_mean = 0.0
+
+        return {
+            "mu_E_mean": float(np.mean(mu_vals)) if len(mu_vals) > 0 else 0.0,
+            "nu_H_mean": float(np.mean(nu_vals)) if len(nu_vals) > 0 else 0.0,
+            "RemE_mean": float(np.mean(rem_e_vals)) if len(rem_e_vals) > 0 else 0.0,
+            "RemH_mean": float(np.mean(rem_h_vals)) if len(rem_h_vals) > 0 else 0.0,
+            "C_E_mean": C_E_mean,
+            "C_H_mean": C_H_mean,
+        }
