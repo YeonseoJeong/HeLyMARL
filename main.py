@@ -60,7 +60,7 @@ def make_trainer(env):
 if __name__ == "__main__":
     seed = 0
     kappa_list = [0.03]
-    lambda_E = 0.0
+    lambda_E = 15.0
 
     steps_per_episode = 10000
     train_episodes = 5

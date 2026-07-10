@@ -362,6 +362,18 @@ class HAPPOTrainer:
                 ue_ent_epoch += float(loss_ent.item())
                 ue_cnt += 1
 
+            # happo correction term
+            # with torch.no_grad():
+            #     updated_ue_logits = self.ue_actor(ue_local_f).masked_fill(~ue_masks_f, float("-inf"))
+            #     updated_ue_dist = Categorical(logits=updated_ue_logits)
+            #     updated_ue_logp = updated_ue_dist.log_prob(ue_actions_f).reshape(T, N)
+            #     old_ue_logp = ue_old_logp.reshape(T, N)
+            #     ue_log_ratio_per_agent = (updated_ue_logp - old_ue_logp)
+            #     ue_group_log_ratio = (ue_log_ratio_per_agent.mean(dim=1))
+            #     ue_correction=torch.exp(ue_group_log_ratio)
+            #     M_ue_t = (ue_correction * adv).detach()
+            #     bs_M_f = M_ue_t.repeat_interleave(B)
+
             # BS actor
             bs_epoch, bs_ent_epoch, bs_cnt = 0.0, 0.0, 0
             M_bs = T * B
@@ -375,7 +387,9 @@ class HAPPOTrainer:
 
                 ratio = torch.exp(new_logp - bs_old_logp_f[mb])
                 surr1 = ratio * bs_adv_f[mb]
+                # surr1 = ratio * bs_M_f[mb]  # happo correction term
                 surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * bs_adv_f[mb]
+                # surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * bs_M_f[mb]  # happo correction term
                 loss_pi = -torch.min(surr1, surr2).mean()
                 loss_ent = -entropy.mean()
 
