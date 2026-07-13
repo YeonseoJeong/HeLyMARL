@@ -2,6 +2,21 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+plt.rcParams.update({
+    "font.family": "Times New Roman",
+    "mathtext.fontset": "stix",
+    "mathtext.rm": "Times New Roman",
+    "mathtext.it": "Times New Roman:italic",
+    "mathtext.bf": "Times New Roman:bold",
+    "font.size": 13,
+    "axes.labelsize": 17,
+    "axes.titlesize": 17,
+    "legend.fontsize": 12,
+    "xtick.labelsize": 13,
+    "ytick.labelsize": 13,
+    "axes.linewidth": 1.4,
+    "lines.linewidth": 2.2,
+})
 
 def moving_avg(x, window=100):
     x = np.asarray(x, dtype=np.float32).reshape(-1)
@@ -25,6 +40,7 @@ def plot_train_reward_loss(
     save_dir=None,
     reward_smooth_window=1000,
     title_prefix="HeLyMARL",
+    steps_per_episode=10000,
     compare_reward_npz_paths=None,
 ):
     data = np.load(npz_path)
@@ -35,34 +51,30 @@ def plot_train_reward_loss(
 
     base = os.path.splitext(os.path.basename(npz_path))[0]
 
-    # ======================================================
-    # 1) Reward plot
-    # ======================================================
-    def _load_reward(npz_file):
-        d = np.load(npz_file)
+    # ====================================================== 
+    # 1) Reward plot 
+    # ====================================================== 
+    def _load_reward(npz_file): 
+        d = np.load(npz_file) 
 
-        if (
-            "reward_x_1000" in d
-            and "global_reward_1000" in d
-            and len(d["global_reward_1000"]) > 0
-        ):
-            x = np.asarray(d["reward_x_1000"], dtype=np.float32)
-            y = np.asarray(d["global_reward_1000"], dtype=np.float32)
-            label_suffix = "block avg 1000"
+        if ( "reward_x_1000" in d and "global_reward_1000" in d and len(d["global_reward_1000"]) > 0 ): 
+            x = np.asarray(d["reward_x_1000"], dtype=np.float32) 
+            y = np.asarray(d["global_reward_1000"], dtype=np.float32) 
+            label_suffix = "block avg 1000" 
 
-        elif "global_reward" in d and len(d["global_reward"]) > 0:
-            raw = np.asarray(d["global_reward"], dtype=np.float32)
-            y = moving_avg(raw, reward_smooth_window)
-            x = np.arange(1, len(y) + 1)
-            label_suffix = f"MA {reward_smooth_window}"
+        elif "global_reward" in d and len(d["global_reward"]) > 0: 
+            raw = np.asarray(d["global_reward"], dtype=np.float32) 
+            y = moving_avg(raw, reward_smooth_window) 
+            x = np.arange(1, len(y) + 1) 
+            label_suffix = f"MA {reward_smooth_window}" 
 
-        else:
-            x, y, label_suffix = None, None, None
+        else: 
+            x, y, label_suffix = None, None, None 
 
-        d.close()
+        d.close() 
         return x, y, label_suffix
-
-        # ------------------------------------------------------
+    
+    # ------------------------------------------------------
     # Case A: compare multiple algorithms
     # Normalized reward comparison
     # compare_reward_npz_paths = {
@@ -133,18 +145,71 @@ def plot_train_reward_loss(
         reward_x, reward_y, label_suffix = _load_reward(npz_path)
 
         if reward_x is not None:
+            episode_x = reward_x / steps_per_episode
+
             plt.figure(figsize=(7, 4.5))
+
+            # --------------------------------------------------
+            # 1) 기존 이동평균 또는 block-average reward
+            # --------------------------------------------------
             plt.plot(
-                reward_x,
+                episode_x,
                 reward_y,
                 linewidth=2.0,
+                color="#1F4E79" ,
                 label=f"Global reward ({label_suffix})"
             )
-            plt.xlabel("Training step")
+            # --------------------------------------------------
+            # 2) Episode별 평균 reward 계산
+            # --------------------------------------------------
+            with np.load(npz_path) as d:
+                if "global_reward" in d and len(d["global_reward"]) > 0:
+                    raw_reward = np.asarray(d["global_reward"], dtype=np.float32).reshape(-1)
+                    n_episodes = len(raw_reward) // steps_per_episode
+                    if n_episodes > 0:
+                        trimmed_reward = raw_reward[:n_episodes * steps_per_episode]
+                        episode_reward_matrix = trimmed_reward.reshape(n_episodes, steps_per_episode)
+                        episode_mean_reward = np.mean(episode_reward_matrix, axis=1)
+                        episode_idx = np.arange(1, n_episodes + 1)
+                        # episode_idx = np.arange(n_episodes, dtype=np.float32) + 0.5
+                        plt.plot(
+                            episode_idx,
+                            episode_mean_reward,
+                            marker='o',
+                            linestyle='--',
+                            linewidth=1.5,
+                            color="#D55E00",
+                            markersize=4,
+                            label="Episode-average reward"
+                        )
+
+                        # Episode별 평균값 출력
+                        print("\nEpisode-average reward")
+                        print("=" * 50)
+
+                        for ep, mean_reward in zip(
+                            episode_idx,
+                            episode_mean_reward
+                        ):
+                            print(
+                                f"Episode {ep:2d}: "
+                                f"{mean_reward:.6f}"
+                            )
+                        
+                    
+            max_episode = int(np.ceil(np.max(episode_x)))
+            
+            for ep in range(1, max_episode + 1):
+                plt.axvline(x=ep, color="gray", linestyle="--", linewidth=0.5, alpha=0.3)
+
+            plt.xlabel("Training Episode")
             plt.ylabel("Reward")
-            plt.title(f"{title_prefix} Training Reward")
+            # plt.title(f"{title_prefix} Training Reward")
             plt.grid(True, alpha=0.3)
-            plt.legend()
+            ax = plt.gca()
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            plt.legend(loc= "lower right")
             plt.tight_layout()
 
             reward_path = os.path.join(save_dir, f"{base}_reward.png")
@@ -286,9 +351,19 @@ if __name__ == "__main__":
         npz_path="results/results_kappa/HeLyMARL_train_rewards_kappa_0.03.npz",
         save_dir="results/results_kappa/plots",
         title_prefix="HeLyMARL kappa=0.03",
+        steps_per_episode=10000,
         compare_reward_npz_paths={
-            "PF-HAPPO": "results/results_baselines/ConstrainedHAPPO_pf_train_rewards_kappa_0.03.npz",
-            "Jensen-HAPPO": "results/results_baselines/ConstrainedHAPPO_jensen_train_rewards_kappa_0.03.npz",
-            "HeLyMARL": "results/results_kappa/HeLyMARL_train_rewards_kappa_0.03.npz",
-        },  
+            "PF-HAPPO": (
+                "results/results_baselines/"
+                "ConstrainedHAPPO_pf_train_rewards_kappa_0.03.npz"
+            ),
+            "Jensen-HAPPO": (
+                "results/results_baselines/"
+                "ConstrainedHAPPO_jensen_train_rewards_kappa_0.03.npz"
+            ),
+            "HeLyMARL": (
+                "results/results_kappa/"
+                "HeLyMARL_train_rewards_kappa_0.03.npz"
+            ),
+        }
     )

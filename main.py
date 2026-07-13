@@ -59,18 +59,18 @@ def make_trainer(env):
 
 if __name__ == "__main__":
     seed = 0
-    kappa_list = [0.03]
-    lambda_E = 15.0
+    kappa = 0.03
+    lambda_E_list = [0.0]
 
     steps_per_episode = 10000
-    train_episodes = 5
+    train_episodes = 10
     eval_episode = 1
     update_interval = 128
 
     os.makedirs("results/results_kappa", exist_ok=True)
 
-    for kappa in kappa_list:
-        print(f"\n=== Training with kappa = {kappa} ===")
+    for lambda_E in lambda_E_list:
+        print(f"\n=== Training with lambda_E = {lambda_E} ===")
 
         env_soft = make_env(seed, lambda_E, kappa=kappa, use_hard_constraint=False)
         trainer_soft = make_trainer(env_soft)

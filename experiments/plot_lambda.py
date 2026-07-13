@@ -380,6 +380,444 @@ def plot_queue_timeseries_all_lambdas(files, plot_dir, prefix, smooth_window=100
         plt.savefig(os.path.join(plot_dir, save_name), dpi=300)
         plt.close()
 
+# =========================================================
+# Lambda sensitivity metrics
+# =========================================================
+def normalize_power_mat(power_mat, num_bs=None):
+    """
+    Convert power_mat to shape: (num_bs, num_steps)
+
+    Expected common formats:
+        (num_bs, num_steps)
+        (num_steps, num_bs)
+    """
+    power_mat = np.asarray(power_mat)
+
+    if power_mat.ndim != 2 or power_mat.size == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+
+    if num_bs is not None:
+        if power_mat.shape[0] == num_bs:
+            return power_mat
+        if power_mat.shape[1] == num_bs:
+            return power_mat.T
+
+    # 일반적으로 BS 수보다 time-step 수가 훨씬 큼
+    if power_mat.shape[0] > power_mat.shape[1]:
+        power_mat = power_mat.T
+
+    return power_mat
+
+
+def compute_tracking_rmse(
+    power_mat,
+    target_ratio,
+    window=500,
+    num_bs=None
+):
+    """
+    Sliding-window BS ON-ratio와 target_ratio 사이의 RMSE.
+
+    BS별 sliding-window ON-ratio:
+        rho_hat_b(t) = (1/W) sum y_b(tau)
+
+    Tracking RMSE:
+        sqrt(mean_{b,t}[(rho_hat_b(t) - rho)^2])
+
+    작은 값일수록 각 BS가 목표 ON-ratio를 시간적으로
+    안정적으로 추종한다는 의미.
+    """
+    power_mat = normalize_power_mat(power_mat, num_bs=num_bs)
+
+    if power_mat.size == 0:
+        return np.nan
+
+    bs_on_mat = (power_mat > 0.0).astype(np.float32)
+    n_bs, n_steps = bs_on_mat.shape
+
+    if n_steps == 0:
+        return np.nan
+
+    window = max(1, min(int(window), n_steps))
+    kernel = np.ones(window, dtype=np.float32) / float(window)
+
+    window_on_ratios = []
+
+    for b in range(n_bs):
+        local_ratio = np.convolve(
+            bs_on_mat[b],
+            kernel,
+            mode="valid"
+        )
+        window_on_ratios.append(local_ratio)
+
+    window_on_ratios = np.asarray(
+        window_on_ratios,
+        dtype=np.float32
+    )
+
+    tracking_rmse = np.sqrt(
+        np.mean((window_on_ratios - target_ratio) ** 2)
+    )
+
+    return float(tracking_rmse)
+
+
+def compute_budget_lifetime(
+    power_mat,
+    energy_budget_ratio,
+    num_bs=None
+):
+    """
+    BS별 에너지 예산 소진 시점을 계산하고 평균하여 정규화.
+
+    fixed per-slot energy consumption을 가정하면,
+    BS b의 허용 ON 횟수는 대략
+
+        floor(rho * T)
+
+    이다.
+
+    lifetime_b:
+        cumulative ON count가 budget에 도달한 시점 / T
+
+    system-level budget lifetime:
+        BS별 lifetime의 평균
+
+    반환값:
+        0 ~ 1
+
+    1에 가까울수록 BS들이 horizon 끝까지 예산을 유지.
+    """
+    power_mat = normalize_power_mat(power_mat, num_bs=num_bs)
+
+    if power_mat.size == 0:
+        return np.nan
+
+    bs_on_mat = (power_mat > 0.0).astype(np.int64)
+    n_bs, n_steps = bs_on_mat.shape
+
+    if n_steps == 0 or np.isnan(energy_budget_ratio):
+        return np.nan
+
+    # 각 BS가 horizon 동안 사용할 수 있는 최대 ON 횟수
+    max_on_count = int(
+        np.floor(float(energy_budget_ratio) * n_steps)
+    )
+
+    if max_on_count <= 0:
+        return 0.0
+
+    lifetime_per_bs = []
+
+    for b in range(n_bs):
+        cumulative_on = np.cumsum(bs_on_mat[b])
+
+        exhausted_indices = np.where(
+            cumulative_on >= max_on_count
+        )[0]
+
+        if len(exhausted_indices) == 0:
+            # horizon 내에서 예산을 모두 사용하지 않음
+            exhaustion_step = n_steps
+        else:
+            # index가 0부터 시작하므로 실제 step 수는 +1
+            exhaustion_step = int(exhausted_indices[0] + 1)
+
+        normalized_lifetime = exhaustion_step / float(n_steps)
+        lifetime_per_bs.append(normalized_lifetime)
+
+    return float(np.mean(lifetime_per_bs))
+
+
+def summarize_lambda_sensitivity(
+    path,
+    tracking_window=500,
+    metric_window=None
+):
+    """
+    하나의 eval npz 파일에서 다음 지표를 계산:
+        1. average throughput
+        2. average JFI
+        3. tracking RMSE
+        4. budget lifetime
+
+    metric_window:
+        None  -> 전체 evaluation horizon 평균
+        정수값 -> 마지막 metric_window 구간 평균
+    """
+    data = load_npz(path)
+
+    throughput = safe_get(
+        data,
+        "throughput",
+        np.array([])
+    )
+
+    fairness = safe_get(
+        data,
+        "fairness",
+        np.array([])
+    )
+
+    power_mat = safe_get(
+        data,
+        "power_mat",
+        np.zeros((0, 0), dtype=np.float32)
+    )
+
+    energy_budget_arr = safe_get(
+        data,
+        "energy_budget_ratio",
+        np.array([np.nan])
+    )
+
+    if energy_budget_arr is None or len(energy_budget_arr) == 0:
+        energy_budget_ratio = np.nan
+    else:
+        energy_budget_ratio = float(
+            np.asarray(energy_budget_arr).reshape(-1)[0]
+        )
+
+    # -----------------------------------------------------
+    # 평균을 계산할 evaluation 구간
+    # -----------------------------------------------------
+    if metric_window is None:
+        throughput_used = throughput
+        fairness_used = fairness
+    else:
+        throughput_used = throughput[-metric_window:]
+        fairness_used = fairness[-metric_window:]
+
+    avg_throughput = (
+        float(np.mean(throughput_used))
+        if np.asarray(throughput_used).size > 0
+        else np.nan
+    )
+
+    avg_jfi = (
+        float(np.mean(fairness_used))
+        if np.asarray(fairness_used).size > 0
+        else np.nan
+    )
+
+    tracking_rmse = compute_tracking_rmse(
+        power_mat=power_mat,
+        target_ratio=energy_budget_ratio,
+        window=tracking_window
+    )
+
+    budget_lifetime = compute_budget_lifetime(
+        power_mat=power_mat,
+        energy_budget_ratio=energy_budget_ratio
+    )
+
+    return {
+        "lambda": parse_lambda(path),
+        "avg_throughput": avg_throughput,
+        "avg_jfi": avg_jfi,
+        "tracking_rmse": tracking_rmse,
+        "budget_lifetime": budget_lifetime,
+        "energy_budget_ratio": energy_budget_ratio
+    }
+
+
+def plot_lambda_sensitivity_four_metrics(
+    eval_files,
+    plot_dir,
+    tracking_window=500,
+    metric_window=None,
+    eval_variant="hard"
+):
+    """
+    2x2 subplot:
+
+        (a) Average throughput
+        (b) Average JFI
+        (c) Energy-budget tracking RMSE
+        (d) Budget lifetime
+    """
+    if len(eval_files) == 0:
+        print("[Warning] No evaluation files.")
+        return
+
+    summaries = [
+        summarize_lambda_sensitivity(
+            path=f,
+            tracking_window=tracking_window,
+            metric_window=metric_window
+        )
+        for f in eval_files
+    ]
+
+    summaries = sorted(
+        summaries,
+        key=lambda item: item["lambda"]
+    )
+
+    lambdas = np.asarray(
+        [s["lambda"] for s in summaries],
+        dtype=np.float32
+    )
+
+    avg_throughput = np.asarray(
+        [s["avg_throughput"] for s in summaries],
+        dtype=np.float32
+    )
+
+    avg_jfi = np.asarray(
+        [s["avg_jfi"] for s in summaries],
+        dtype=np.float32
+    )
+
+    tracking_rmse = np.asarray(
+        [s["tracking_rmse"] for s in summaries],
+        dtype=np.float32
+    )
+
+    budget_lifetime = np.asarray(
+        [s["budget_lifetime"] for s in summaries],
+        dtype=np.float32
+    )
+
+    # -----------------------------------------------------
+    # 결과 출력
+    # -----------------------------------------------------
+    print("\n" + "=" * 90)
+    print("Lambda sensitivity summary")
+    print("=" * 90)
+    print(
+        f"{'lambda_E':>10} | "
+        f"{'Throughput':>12} | "
+        f"{'JFI':>10} | "
+        f"{'Tracking RMSE':>15} | "
+        f"{'Budget Lifetime':>16}"
+    )
+    print("-" * 90)
+
+    for s in summaries:
+        print(
+            f"{s['lambda']:>10.4g} | "
+            f"{s['avg_throughput']:>12.4f} | "
+            f"{s['avg_jfi']:>10.4f} | "
+            f"{s['tracking_rmse']:>15.4f} | "
+            f"{s['budget_lifetime']:>16.4f}"
+        )
+
+    print("=" * 90)
+
+    # -----------------------------------------------------
+    # Plot
+    # -----------------------------------------------------
+    plt.rcParams.update({
+        "font.family": "Times New Roman",
+        "font.size": 14,
+        "axes.labelsize": 15,
+        "axes.titlesize": 16,
+        "legend.fontsize": 12
+    })
+
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(12, 9)
+    )
+
+    marker_style = {
+        "marker": "o",
+        "linewidth": 2,
+        "markersize": 7
+    }
+
+    # -----------------------------------------------------
+    # (a) Average throughput
+    # -----------------------------------------------------
+    axes[0, 0].plot(
+        lambdas,
+        avg_throughput,
+        **marker_style
+    )
+
+    axes[0, 0].set_xlabel(r"$\lambda_E$")
+    axes[0, 0].set_ylabel("Average Throughput [Gbps]")
+    axes[0, 0].set_title("(a) Average Throughput")
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # -----------------------------------------------------
+    # (b) Average JFI
+    # -----------------------------------------------------
+    axes[0, 1].plot(
+        lambdas,
+        avg_jfi,
+        **marker_style
+    )
+
+    axes[0, 1].set_xlabel(r"$\lambda_E$")
+    axes[0, 1].set_ylabel("Jain's Fairness Index")
+    axes[0, 1].set_title("(b) Average JFI")
+    axes[0, 1].set_ylim(0.0, 1.05)
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # -----------------------------------------------------
+    # (c) Tracking RMSE
+    # -----------------------------------------------------
+    axes[1, 0].plot(
+        lambdas,
+        tracking_rmse,
+        **marker_style
+    )
+
+    axes[1, 0].set_xlabel(r"$\lambda_E$")
+    axes[1, 0].set_ylabel("Tracking RMSE")
+    axes[1, 0].set_title(
+        rf"(c) Energy-Budget Tracking RMSE ($W={tracking_window}$)"
+    )
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # -----------------------------------------------------
+    # (d) Budget lifetime
+    # -----------------------------------------------------
+    axes[1, 1].plot(
+        lambdas,
+        budget_lifetime,
+        **marker_style
+    )
+
+    axes[1, 1].axhline(
+        1.0,
+        linestyle="--",
+        linewidth=1.8,
+        label="Full Horizon"
+    )
+
+    axes[1, 1].set_xlabel(r"$\lambda_E$")
+    axes[1, 1].set_ylabel("Normalized Budget Lifetime")
+    axes[1, 1].set_title("(d) Budget Lifetime")
+    axes[1, 1].set_ylim(0.0, 1.05)
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].legend(loc="lower right")
+
+    plt.tight_layout()
+
+    suffix = (
+        f"_{eval_variant}"
+        if eval_variant in ["soft", "hard"]
+        else ""
+    )
+
+    save_path = os.path.join(
+        plot_dir,
+        f"summary{suffix}_lambda_sensitivity_four_metrics.png"
+    )
+
+    plt.savefig(
+        save_path,
+        dpi=300,
+        bbox_inches="tight"
+    )
+    plt.close()
+
+    print(f"Saved lambda sensitivity plot: {save_path}")
 
 def plot_eval_timeseries_all_lambdas(eval_files, plot_dir, smooth_window=1000, eval_variant="soft"):
     labels = [rf"$\lambda_E={parse_lambda(f):g}$" for f in eval_files]
@@ -626,14 +1064,14 @@ def plot_eval_summary_vs_lambda(eval_files, plot_dir, last_window=10000, eval_va
 # =========================================================
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--result_dir", type=str, default="results_lambda")
+    parser.add_argument("--result_dir", type=str, default="results/results_lambda")
     parser.add_argument("--mode", type=str, default="all", choices=["all", "train", "eval", "summary"])
     parser.add_argument("--last_window", type=int, default=10000)
     parser.add_argument("--smooth_window", type=int, default=1000)
     parser.add_argument(
         "--eval_variant",
         type=str,
-        default="soft",
+        default="hard",
         choices=["soft", "hard", "all"],
         help="Which eval files to plot. Use soft for natural policy behavior, hard for hard-constrained evaluation."
     )
@@ -686,6 +1124,13 @@ def main():
                 eval_files,
                 plot_dir,
                 last_window=args.last_window,
+                eval_variant=args.eval_variant
+            )
+            plot_lambda_sensitivity_four_metrics(
+                eval_files=eval_files,
+                plot_dir=plot_dir,
+                tracking_window=500,
+                metric_window=None,
                 eval_variant=args.eval_variant
             )
         else:

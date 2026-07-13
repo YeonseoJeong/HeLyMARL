@@ -171,6 +171,44 @@ def get_throughput(data):
 
     return np.nan
 
+def get_avg_user_rates(data):
+    if "avg_user_rates" in data.files:
+        rates = np.asarray(data["avg_user_rates"], dtype=float)
+        rates = np.squeeze(rates)
+
+        if rates.ndim == 1:
+            return np.nan_to_num(rates, nan=0.0, posinf=0.0, neginf=0.0)
+        if rates.ndim == 2:
+            if rates.shape[0] >= rates.shape[1]:
+                user_rates = np.nanmean(rates, axis=0)
+            else:
+                user_rates = np.nanmean(rates, axis=1)
+            return np.nan_to_num(user_rates, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    if "slot_rates" in data.files:
+        rates = np.asarray(data["slot_rates"], dtype=float)
+        rates = np.squeeze(rates)
+
+        if rates.ndim == 1:
+            return np.nan_to_num(rates, nan=0.0, posinf=0.0, neginf=0.0)
+        if rates.ndim == 2:
+            if rates.shape[0] >= rates.shape[1]:
+                user_rates = np.nanmean(rates, axis=0)
+            else:
+                user_rates = np.nanmean(rates, axis=1)
+    return None
+
+def get_network_utility(data, eps= 1e-8):
+    avg_user_rates = get_avg_user_rates(data)
+    if avg_user_rates is None:
+        return np.nan
+    avg_user_rates = np.asarray(avg_user_rates, dtype=float).reshape(-1)
+    if avg_user_rates.size == 0:
+        return np.nan
+    avg_user_rates = np.nan_to_num(avg_user_rates, nan=0.0, posinf=0.0, neginf=0.0)
+    avg_user_rates = np.maximum(avg_user_rates, 0.0)
+    avg_user_rates_bps = avg_user_rates * 1e9
+    return float(np.sum(np.log(avg_user_rates_bps + eps)))
 
 # ============================================================
 # 6. 결과 읽기
@@ -178,6 +216,7 @@ def get_throughput(data):
 algorithms = []
 fairness_values = []
 throughput_values = []
+utility_values = []
 
 for algorithm, path in NPZ_FILES.items():
 
@@ -188,22 +227,25 @@ for algorithm, path in NPZ_FILES.items():
     with np.load(path, allow_pickle=True) as data:
         fairness = get_fairness(data)
         throughput = get_throughput(data)
+        utility = get_network_utility(data, eps=1e-8)
 
         algorithms.append(DISPLAY_NAMES[algorithm])
         fairness_values.append(fairness)
         throughput_values.append(throughput)
+        utility_values.append(utility)
 
         print(
             f"{algorithm:15s} | "
             f"Fairness={fairness:.4f} | "
-            f"Throughput={throughput:.4f}"
+            f"Throughput={throughput:.4f} | "
+            f"Objective={utility:.4f}"
         )
 
 
 algorithms = np.asarray(algorithms)
 fairness_values = np.asarray(fairness_values, dtype=float)
 throughput_values = np.asarray(throughput_values, dtype=float)
-
+utility_values = np.asarray(utility_values, dtype=float)
 x = np.arange(len(algorithms))
 
 
@@ -374,6 +416,120 @@ plt.savefig(
 
 plt.close()
 
+# ============================================================
+# 10. Objective function figure
+#     Equation (7):
+#     sum_u log((1/T) sum_t R_u(t))
+# ============================================================
+fig, ax = plt.subplots(figsize=(8.2, 6.0))
+
+utility_plot_values = utility_values / 1e2
+
+def truncate(value, decimals=2):
+    factor = 10 ** decimals
+    return np.trunc(value * factor) / factor
+
+
+bars = ax.bar(
+    x,
+    utility_plot_values,
+    width=0.62,
+    color=bar_colors,
+    edgecolor="black",
+    linewidth=1.2,
+) 
+
+for bar, hatch in zip(bars, bar_hatches):
+    bar.set_hatch(hatch)
+
+finite_utility = utility_plot_values[
+    np.isfinite(utility_plot_values)
+]
+
+if finite_utility.size > 0:
+    utility_range = (
+        np.max(finite_utility)
+        - np.min(finite_utility)
+    )
+
+    text_offset = max(
+        utility_range * 0.04,
+        0.002,
+    )
+else:
+    text_offset = 0.002
+
+for bar, value in zip(bars, utility_plot_values):
+    if np.isfinite(value):
+        truncated_value = truncate(
+            value,
+            decimals=2,
+        )
+
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            value + text_offset,
+            f"{truncated_value:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=15,
+        )
+
+
+ax.set_ylabel(
+    r"Network Utility "
+    r"$\sum_{u=1}^{U}\log(\bar{R}_u)$ "
+    r"$(\times 10^2)$"
+)
+
+ax.set_xticks(x)
+ax.set_xticklabels(
+    algorithms,
+    rotation=30,
+    ha="right",
+)
+
+if finite_utility.size > 0:
+    ymin = np.min(finite_utility)
+    ymax = np.max(finite_utility)
+
+    margin = max(
+        (ymax - ymin) * 0.25,
+        0.01,
+    )
+
+    ax.set_ylim(
+        ymin - margin,
+        ymax + margin,
+    )
+
+ax.grid(
+    axis="y",
+    linestyle="-",
+    linewidth=0.7,
+    alpha=0.25,
+)
+
+ax.set_axisbelow(True)
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+plt.tight_layout()
+
+utility_path = os.path.join(
+    SAVE_DIR,
+    "objective_comparison.png",
+)
+
+plt.savefig(
+    utility_path,
+    dpi=300,
+    bbox_inches="tight",
+)
+
+plt.close()
+
 
 print(f"\nSaved fairness figure:   {fairness_path}")
 print(f"Saved throughput figure: {throughput_path}")
+print(f"Saved objective figure:  {utility_path}")
