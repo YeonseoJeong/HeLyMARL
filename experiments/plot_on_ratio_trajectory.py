@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 NPZ_FILES = {
     "DDPP": (
         "results/results_compare/"
-        "DDPP_eval_lambda_0.npz"
+        "DDPP_eval_lambda_0.0.npz"
     ),
     "MaxSNR": (
         "results/results_compare/"
@@ -17,11 +17,11 @@ NPZ_FILES = {
     ),
     "PF-HAPPO": (
         "results/results_baselines/"
-        "ConstrainedHAPPO_pf_eval_hard_kappa_0.03.npz"
+        "ConstrainedHAPPO_pf_eval_hard_kappa_0.03_use_dimensionless.npz"
     ),
     "Jensen-HAPPO": (
         "results/results_baselines/"
-        "ConstrainedHAPPO_jensen_eval_hard_kappa_0.03.npz"
+        "ConstrainedHAPPO_jensen_eval_hard_kappa_0.03_use_dimensionless.npz"
     ),
     "HeLyMARL": (
         "results/results_kappa/"

@@ -439,6 +439,8 @@ class HAPPOTrainer:
         # --------------------------------------------------
         update_step_history = []
         update_episode_history = []
+        handover_ratio_history = []
+        episode_handover_ratio_history = []
 
         critic_loss_history = []
         actor_ue_loss_history = []
@@ -497,6 +499,29 @@ class HAPPOTrainer:
                     bs_actions=bs_actions,
                     cand_lists=cand_lists
                 )
+
+                handover_u = info.get("handover_u", {})
+
+                if isinstance(handover_u, dict):
+                    slot_ho_ratio = float(
+                        np.mean([
+                            float(handover_u[u.ue_id])
+                            for u in self.env.users
+                        ])
+                    )
+                else:
+                    handover_arr = np.asarray(
+                        handover_u,
+                        dtype=np.float32,
+                    ).reshape(-1)
+
+                    slot_ho_ratio = (
+                        float(np.mean(handover_arr))
+                        if handover_arr.size > 0
+                        else 0.0
+                    )
+
+                handover_ratio_history.append(slot_ho_ratio)
 
                 reward = float(info["global_reward"])
                 ep_reward_sum += reward
@@ -582,7 +607,7 @@ class HAPPOTrainer:
                 # 통신 성능은 evaluate에서 보면 되니까 여기서는 queue/reward만 확인
                 # --------------------------------------------------
                 if global_step % 1000 == 0:
-                    recent_reward = float(np.mean(global_reward_history[-1000:]))
+                    recent_reward = float(np.mean(global_reward_history[-100:]))
                     if self._is_constrained_env():
                         print(
                             f"Ep {ep+1:4d} | "
@@ -612,6 +637,10 @@ class HAPPOTrainer:
             # 다음 episode 시작에서 reset됨.
             # --------------------------------------------------
             episode_reward_history.append(float(ep_reward_sum / max(1, steps_per_episode)))
+            episode_start = ep * steps_per_episode
+            episode_end = len(handover_ratio_history)
+
+            episode_handover_ratio_history.append(float(np.mean(handover_ratio_history[episode_start:episode_end])))
             
             if self._is_constrained_env():
                 episode_mu_E_last_history.append(float(mu_E_mean_history[-1]))
@@ -648,6 +677,8 @@ class HAPPOTrainer:
         results = {
             # reward / queue
             "global_reward": global_reward_history,
+            "handover_ratio": handover_ratio_history,
+            "episode_handover_ratio": episode_handover_ratio_history,
 
             # loss curves
             "update_step_history": update_step_history,
@@ -694,7 +725,6 @@ class HAPPOTrainer:
             self.save_results_npz(results, save_npz_path, tag="train")
 
         return results
-    
 
     @torch.no_grad()
     def evaluate(self, 
@@ -995,6 +1025,8 @@ class HAPPOTrainer:
         # Common arrays
         # =====================================================
         global_reward = np.asarray(results.get("global_reward", []), dtype=np.float32)
+        handover_ratio = np.asarray(results.get("handover_ratio", []), dtype=np.float32)
+        episode_handover_ratio = np.asarray(results.get("episode_handover_ratio", []), dtype=np.float32)
 
         Q_mean = np.asarray(results.get("Q_mean_history", []), dtype=np.float32)
         Z_mean = np.asarray(results.get("Z_mean_history", []), dtype=np.float32)
@@ -1048,6 +1080,9 @@ class HAPPOTrainer:
                     reward_x_500=reward_x_500,
                     global_reward_500=global_reward_500,
 
+                    handover_ratio=handover_ratio,
+                    episode_handover_ratio=episode_handover_ratio,
+
                     mu_E_mean=mu_E_mean,
                     nu_H_mean=nu_H_mean,
                     RemE_mean=RemE_mean,
@@ -1088,6 +1123,9 @@ class HAPPOTrainer:
                     global_reward=global_reward,
                     reward_x_500=reward_x_500,
                     global_reward_500=global_reward_500,
+
+                    handover_ratio=handover_ratio,
+                    episode_handover_ratio=episode_handover_ratio,
 
                     Q_mean=Q_mean,
                     Z_mean=Z_mean,

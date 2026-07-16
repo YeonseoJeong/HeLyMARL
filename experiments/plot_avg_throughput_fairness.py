@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 NPZ_FILES = {
     "DDPP": (
         "results/results_compare/"
-        "DDPP_eval_lambda_0.npz"
+        "DDPP_eval_lambda_0.0.npz"
     ),
     "MaxSNR": (
         "results/results_compare/"
@@ -17,11 +17,11 @@ NPZ_FILES = {
     ),
     "PF-HAPPO": (
         "results/results_baselines/"
-        "ConstrainedHAPPO_pf_eval_hard_kappa_0.03.npz"
+        "ConstrainedHAPPO_pf_eval_hard_kappa_0.03_use_dimensionless.npz"
     ),
     "Jensen-HAPPO": (
         "results/results_baselines/"
-        "ConstrainedHAPPO_jensen_eval_hard_kappa_0.03.npz"
+        "ConstrainedHAPPO_jensen_eval_hard_kappa_0.03_use_dimensionless.npz"
     ),
     "HeLyMARL": (
         "results/results_kappa/"
@@ -118,39 +118,157 @@ def jain_fairness(rates, eps=1e-12):
 
     return float(numerator / (denominator + eps))
 
+def block_jain_fairness(
+    slot_rates,
+    block_size=1000,
+    eps=1e-12,
+):
+    """
+    slot_rates를 block_size 단위로 나누어 JFI를 계산한다.
 
-def get_fairness(data):
+    - 입력: [T, U] 또는 [U, T]
+    - 각 블록에서 UE별 평균 rate를 구한 뒤 JFI 계산
+    - 모든 UE의 평균 rate가 0인 all-off 블록은 제외
+    - 마지막 블록이 1000 step보다 짧아도 포함
+    """
+    rates = np.asarray(slot_rates, dtype=float)
+    rates = np.squeeze(rates)
+
+    if rates.size == 0 or rates.ndim != 2:
+        return np.nan
+
+    # [U, T] 형태라면 [T, U]로 변환
+    if rates.shape[0] < rates.shape[1]:
+        rates = rates.T
+
+    rates = np.nan_to_num(
+        rates,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    rates = np.maximum(rates, 0.0)
+
+    block_jfis = []
+
+    for start in range(0, rates.shape[0], block_size):
+        block = rates[start:start + block_size]
+
+        # 해당 1000-step 블록에서 UE별 평균 rate
+        block_user_rates = np.mean(block, axis=0)
+
+        # 모든 UE의 rate가 0인 all-off 블록 제외
+        if np.sum(block_user_rates ** 2) <= eps:
+            continue
+
+        block_jfi = jain_fairness(
+            block_user_rates,
+            eps=eps,
+        )
+
+        if np.isfinite(block_jfi):
+            block_jfis.append(block_jfi)
+
+    if len(block_jfis) == 0:
+        return np.nan
+
+    return float(np.mean(block_jfis))
+
+
+# def get_fairness(data):
+#     """
+#     우선순위:
+#     1) fairness
+#     2) episode_fairness_last
+#     3) fairness_block_jfis 평균
+#     4) avg_user_rates로 직접 계산
+#     5) slot_rates로 직접 계산
+#     """
+#     if "fairness" in data.files:
+#         value = to_scalar_mean(data["fairness"])
+
+#         if not np.isnan(value):
+#             return value
+
+#     if "episode_fairness_last" in data.files:
+#         value = to_scalar_mean(data["episode_fairness_last"])
+
+#         if not np.isnan(value):
+#             return value
+
+#     if "fairness_block_jfis" in data.files:
+#         value = to_scalar_mean(data["fairness_block_jfis"])
+
+#         if not np.isnan(value):
+#             return value
+
+#     if "avg_user_rates" in data.files:
+#         return jain_fairness(data["avg_user_rates"])
+
+#     if "slot_rates" in data.files:
+#         return jain_fairness(data["slot_rates"])
+
+#     return np.nan
+
+def get_fairness(data, block_size=1000):
     """
     우선순위:
-    1) fairness
-    2) episode_fairness_last
-    3) fairness_block_jfis 평균
-    4) avg_user_rates로 직접 계산
-    5) slot_rates로 직접 계산
+    1) slot_rates를 1000-step 블록으로 직접 계산
+       - 모든 UE rate가 0인 all-off 블록 제외
+    2) 저장된 fairness_block_jfis 사용
+       - 0 또는 NaN 블록 제외
+    3) 기존 fairness
+    4) episode_fairness_last
+    5) avg_user_rates
     """
+
+    # 새 방식: slot_rates에서 1000-step block JFI 직접 계산
+    if "slot_rates" in data.files:
+        value = block_jain_fairness(
+            data["slot_rates"],
+            block_size=block_size,
+        )
+
+        if np.isfinite(value):
+            return value
+
+    # slot_rates가 없을 때 저장된 block JFI 사용
+    if "fairness_block_jfis" in data.files:
+        block_jfis = np.asarray(
+            data["fairness_block_jfis"],
+            dtype=float,
+        ).reshape(-1)
+
+        # all-off 블록이 0으로 저장된 경우 제외
+        valid_mask = (
+            np.isfinite(block_jfis)
+            & (block_jfis > 0.0)
+        )
+
+        if np.any(valid_mask):
+            return float(
+                np.mean(block_jfis[valid_mask])
+            )
+
+    # 아래는 기존 결과와의 호환성을 위한 fallback
     if "fairness" in data.files:
         value = to_scalar_mean(data["fairness"])
 
-        if not np.isnan(value):
+        if np.isfinite(value):
             return value
 
     if "episode_fairness_last" in data.files:
-        value = to_scalar_mean(data["episode_fairness_last"])
+        value = to_scalar_mean(
+            data["episode_fairness_last"]
+        )
 
-        if not np.isnan(value):
-            return value
-
-    if "fairness_block_jfis" in data.files:
-        value = to_scalar_mean(data["fairness_block_jfis"])
-
-        if not np.isnan(value):
+        if np.isfinite(value):
             return value
 
     if "avg_user_rates" in data.files:
-        return jain_fairness(data["avg_user_rates"])
-
-    if "slot_rates" in data.files:
-        return jain_fairness(data["slot_rates"])
+        return jain_fairness(
+            data["avg_user_rates"]
+        )
 
     return np.nan
 

@@ -28,7 +28,6 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         mu_max: float = 100.0,
         nu_max: float = 100.0,
         use_dimensionless: bool = True,
-        pf_avg_beta: float = 0.99,
         episode_length: Optional[int] = None,
         **kwargs,
     ):
@@ -46,7 +45,6 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         self.rate_eps = 1e-6
         self.episode_length = int(episode_length) if episode_length is not None else int(self.hard_window_len)
         self.use_dimensionless = bool(use_dimensionless)
-        self.pf_avg_beta = float(pf_avg_beta)
 
         # Dual variables
         self.mu_E_b = {bs.bs_id: 0.0 for bs in self.base_stations}
@@ -68,9 +66,13 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
             for u in self.users
         }
 
-        # PF running average rate, Rbar_u(t-1)
+        # PF cumulative average rate, Rbar_u(t-1)
         self.avg_rate_u = {
-            u.ue_id: 1.0
+            u.ue_id: self.rate_eps
+            for u in self.users
+        }
+        self.avg_rate_count_u = {
+            u.ue_id: 0
             for u in self.users
         }
 
@@ -90,7 +92,11 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         }
 
         self.avg_rate_u = {
-            u.ue_id: 1.0
+            u.ue_id: self.rate_eps
+            for u in self.users
+        }
+        self.avg_rate_count_u = {
+            u.ue_id: 0
             for u in self.users
         }
 
@@ -293,14 +299,16 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
 
         global_reward = float(utility - energy_penalty - handover_penalty)
 
-        # 5. PF running average rate 업데이트
+        # 5. PF cumulative average rate update
         for u in self.users:
             ue_id = u.ue_id
             r = float(served_rates[ue_id])
-            self.avg_rate_u[ue_id] = (
-                self.pf_avg_beta * self.avg_rate_u[ue_id]
-                + (1.0 - self.pf_avg_beta) * r
-            )
+            count = self.avg_rate_count_u[ue_id]
+
+            self.avg_rate_u[ue_id] = (count * self.avg_rate_u[ue_id] + r) / (count + 1) 
+            
+            self.avg_rate_count_u[ue_id] = count + 1
+        
 
         # 6. episode 끝에서만 dual update   
         episode_done = done or ((self.timestep % self.episode_length) == 0)
@@ -426,10 +434,6 @@ class PFHAPPOEnvironment(ConstrainedHAPPOEnvironment):
         r_t = sum_u R_u(t) / (Rbar_u(t-1) + eps)
     """
 
-    def __init__(self, *args, pf_eps: float = 1e-6, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.pf_eps = float(pf_eps)
-
     def _compute_utility(self, served_rates: Dict[int, float]) -> float:
         utility = 0.0
 
@@ -439,12 +443,11 @@ class PFHAPPOEnvironment(ConstrainedHAPPOEnvironment):
             r = float(served_rates[ue_id])
             avg_r_prev = float(self.avg_rate_u[ue_id])
 
-            utility += r / (avg_r_prev + self.pf_eps)
+            utility += r / max(avg_r_prev, self.rate_eps)
 
         return float(utility)
     
     def _bs_candidate_score(self, ue_id: int, rate: float) -> float:
-        avg_r = float(self.avg_rate_u[ue_id])
-        return float(rate / (avg_r + self.pf_eps))
-
+        avg_r_prev = float(self.avg_rate_u[ue_id])
+        return float(rate / max(avg_r_prev, self.rate_eps))
     

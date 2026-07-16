@@ -9,10 +9,10 @@ import matplotlib.pyplot as plt
 # 1. npz 파일 경로만 여기에 맞게 수정
 # ============================================================
 NPZ_FILES = {
-    "DDPP": "results/results_compare/DDPP_eval_lambda_0.npz",
+    "DDPP": "results/results_compare/DDPP_eval_lambda_0.0.npz",
     "MaxSNR": "results/results_compare/MaxSNR_eval_lambda_0.0.npz",
-    "PF-HAPPO": "results/results_baselines/ConstrainedHAPPO_pf_eval_hard_kappa_0.03.npz",
-    "Jensen-HAPPO": "results/results_baselines/ConstrainedHAPPO_jensen_eval_hard_kappa_0.03.npz",
+    "PF-HAPPO": "results/results_baselines/ConstrainedHAPPO_pf_eval_hard_kappa_0.03_use_dimensionless.npz",
+    "Jensen-HAPPO": "results/results_baselines/ConstrainedHAPPO_jensen_eval_hard_kappa_0.03_use_dimensionless.npz",
     "HeLyMARL": "results/results_kappa/HeLyMARL_eval_hard_kappa_0.03.npz",
 }
 

@@ -106,19 +106,51 @@ def plot_train_reward_loss(
                 print(f"[Warning] File not found: {alg_npz_path}")
                 continue
 
-            reward_x, reward_y, label_suffix = _load_reward(alg_npz_path)
+            reward_x, reward_y, label_suffix = _load_reward(
+                alg_npz_path
+            )
 
             if reward_x is None:
                 print(f"[Warning] No reward data found: {alg_npz_path}")
                 continue
 
-            reward_y_norm = _normalize(reward_y)
+            # if alg_name == "PF-HAPPO":
+            #     x_start = float(reward_x[0])
 
+            #     episode_position = np.mod(
+            #         reward_x - x_start,
+            #         steps_per_episode,
+            #     )
+
+            #     pf_mask = (
+            #         episode_position > 2* reward_smooth_window
+            #     ) & np.isfinite(reward_y)
+
+            #     reward_y_selected = reward_y[pf_mask]
+
+            #     if len(reward_y_selected) == 0:
+            #         print("[Warning] No valid PF-HAPPO reward data.")
+            #         continue
+
+            #     reward_y_selected_norm = _normalize(
+            #         reward_y_selected
+            #     )
+
+            #     reward_y_norm = np.full(
+            #         reward_y.shape,
+            #         np.nan,
+            #         dtype=np.float32,
+            #     )
+            #     reward_y_norm[pf_mask] = reward_y_selected_norm
+
+            # else:
+            #     reward_y_norm = _normalize(reward_y)
+            reward_y_norm = _normalize(reward_y)
             plt.plot(
                 reward_x,
                 reward_y_norm,
                 linewidth=2.0,
-                label=f"{alg_name} ({label_suffix}, normalized)"
+                label=f"{alg_name} ({label_suffix}, normalized)",
             )
             plotted = True
 
@@ -355,11 +387,11 @@ if __name__ == "__main__":
         compare_reward_npz_paths={
             "PF-HAPPO": (
                 "results/results_baselines/"
-                "ConstrainedHAPPO_pf_train_rewards_kappa_0.03.npz"
+                "ConstrainedHAPPO_pf_train_rewards_kappa_0.03_use_dimensionless.npz"
             ),
             "Jensen-HAPPO": (
                 "results/results_baselines/"
-                "ConstrainedHAPPO_jensen_train_rewards_kappa_0.03.npz"
+                "ConstrainedHAPPO_jensen_train_rewards_kappa_0.03_use_dimensionless.npz"
             ),
             "HeLyMARL": (
                 "results/results_kappa/"

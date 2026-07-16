@@ -82,6 +82,14 @@ class MaxSNRBaseline:
         self.bs_on_used_in_window = {
             bs.bs_id: 0 for bs in self.base_stations
         }
+
+        self.hard_ho_limit = {
+            ue.ue_id: int(np.floor(self.hard_window_len * self.kappa))
+            for ue in self.users
+        }
+        self.ho_used_in_window = {
+            ue.ue_id: 0 for ue in self.users
+        }
         self.window_step = 0
 
         # Previous serving BS for handover
@@ -202,6 +210,7 @@ class MaxSNRBaseline:
         avg_rate = self.avg_rate_pf.get(ue_id, 1e-3)
 
         return np.log(rate + self.pf_eps) - np.log(avg_rate + self.pf_eps)
+    
     # =========================================================
     # Max-SNR decision
     # =========================================================
@@ -209,17 +218,29 @@ class MaxSNRBaseline:
         """
         Each UE requests the BS with the highest achievable rate.
         In this implementation, achievable rate is used as the Max-SNR proxy.
+
+        hard handover action masking
         """
         associations = {}
 
+        valid_bs_ids = {bs.bs_id for bs in self.base_stations}
+
         for user in self.users:
             ue_id = user.ue_id
+            prev_bs = self.m_u.get(ue_id, None)
+
+            # =====================================================
+            # Hard handover action mask
+            # =====================================================
+            if (prev_bs is not None) and (prev_bs in valid_bs_ids) and (not self.can_handover(ue_id)):
+                candidate_bs_ids = [prev_bs]
+            else:
+                candidate_bs_ids = list(valid_bs_ids)
 
             best_bs = None
             best_rate = -np.inf
 
-            for bs in self.base_stations:
-                bs_id = bs.bs_id
+            for bs_id in candidate_bs_ids:
                 rate = self.calculate_achievable_rate(ue_id, bs_id)
 
                 if rate > best_rate:
@@ -285,6 +306,11 @@ class MaxSNRBaseline:
     # =========================================================
     # Handover
     # =========================================================
+    def can_handover(self, ue_id: int) -> bool:
+        used = self.ho_used_in_window[ue_id]
+        limit = self.hard_ho_limit[ue_id]
+        return used < limit
+    
     def compute_handover_indicator(self, ue_id: int, candidate_bs_id) -> float:
         if candidate_bs_id is None:
             return 0.0
@@ -438,6 +464,13 @@ class MaxSNRBaseline:
         h_u, handover_count = self.compute_handover(scheduled_users)
 
         for ue in self.users:
+            ue_id = ue.ue_id
+
+            # Actual handover consumes one unit of the hard budget
+            if h_u[ue_id] > 0.5:
+                self.ho_used_in_window[ue_id] += 1
+
+            # Virtual queue is retained only for monitoring
             self.G_u[ue.ue_id] = max(
                 0.0,
                 self.G_u[ue.ue_id] + h_u[ue.ue_id] - self.kappa
@@ -453,6 +486,9 @@ class MaxSNRBaseline:
         if self.window_step % self.hard_window_len == 0:
             self.bs_on_used_in_window = {
                 bs.bs_id: 0 for bs in self.base_stations
+            }
+            self.ho_used_in_window = {
+                ue.ue_id: 0 for ue in self.users
             }
 
         self.prev_power = {
@@ -518,6 +554,11 @@ class MaxSNRBaseline:
 
                 ho_count_block = float(np.mean(self.handover_count_history[-1000:]))
                 ho_ratio_block = float(np.mean(self.handover_ratio_history[-1000:]))
+                ho_used_vals = np.asarray(list(self.ho_used_in_window.values()), dtype=float)
+                ho_limit_vals = np.asarray(list(self.hard_ho_limit.values()), dtype=float)
+                mean_ho_used = float(np.mean(ho_used_vals))
+                max_ho_used = float(np.max(ho_used_vals))
+                mean_ho_limit = float(np.mean(ho_limit_vals))
 
                 G_vals = np.array(list(self.G_u.values()), dtype=float)
                 fair_str = "nan" if np.isnan(recent_fair) else f"{recent_fair:.3f}"
@@ -529,7 +570,8 @@ class MaxSNRBaseline:
                     f"ON: [{ratio_str}] | "
                     f"HO(1000): count={ho_count_block:.3f} "
                     f"ratio={ho_ratio_block:.4f}/{self.kappa:.4f} | "
-                    f"G mean/max: {np.mean(G_vals):5.3f}/{np.max(G_vals):5.3f}"
+                    f"G mean/max: {np.mean(G_vals):5.3f}/{np.max(G_vals):5.3f} | "
+                    f"HO Used/Limit: {mean_ho_used:.1f}/{max_ho_used:.1f}/{mean_ho_limit:.1f}"
                 )
 
         print(f"\n{'=' * 70}")
@@ -799,7 +841,7 @@ if __name__ == "__main__":
             seed=0,
             hard_window_len=10000, 
             lambda_E=lambda_E,
-            kappa=0.05,
+            kappa=0.03,
         )
 
         maxsnr.run_simulation()

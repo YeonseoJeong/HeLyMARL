@@ -40,7 +40,8 @@ class DDPPAlgorithm:
                  seed: int = None,
                  use_hard_constraint: bool = False,
                  hard_window_len: int = 10000,
-                 lambda_E: float = 1.0):
+                 lambda_E: float = 1.0,
+                 kappa: float = 0.03):
 
         self.users = users
         self.base_stations = [bs for bs in base_stations if bs.bs_id != 0]
@@ -54,11 +55,17 @@ class DDPPAlgorithm:
         self.use_hard_constraint = bool(use_hard_constraint)
         self.hard_window_len = int(hard_window_len)
         self.lambda_E = float(lambda_E)
+        self.kappa = float(kappa)
 
         self.hard_on_limit = {
             bs.bs_id: int(np.floor(self.hard_window_len * self.power_budget_ratio)) for bs in self.base_stations
         }
         self.bs_on_used_in_window = {bs.bs_id: 0 for bs in self.base_stations}
+        self.hard_ho_limit = {
+            ue.ue_id: int(np.floor(self.hard_window_len * self.kappa)) for ue in self.users
+        }
+        self.ho_used_in_window = {ue.ue_id: 0 for ue in self.users}
+        
         self.window_step = 0
         self.prev_power = {bs.bs_id: 0.0 for bs in self.base_stations}
 
@@ -77,7 +84,7 @@ class DDPPAlgorithm:
         self.gamma_max = {ue.ue_id: 5.0 for ue in users}
 
         self.G_u = {ue.ue_id: 0.0 for ue in users}
-        self.kappa = 0.05
+        self.kappa = kappa
 
         self.m_u = {ue.ue_id: None for ue in users}
 
@@ -235,10 +242,19 @@ class DDPPAlgorithm:
 
         for user in self.users:
             ue_id = user.ue_id
+            prev_bs = self.m_u.get(ue_id, None)
+            used = self.ho_used_in_window[ue_id]
+            limit = self.hard_ho_limit[ue_id]
+
+            if self.use_hard_constraint and prev_bs is not None and used >= limit:
+                candidate_bs_list = [bs for bs in self.base_stations if bs.bs_id == prev_bs]
+            else:
+                candidate_bs_list = self.base_stations
+
             best_bs = None
             best_w = -np.inf
 
-            for bs in self.base_stations:
+            for bs in candidate_bs_list:
                 bs_id = bs.bs_id
 
                 R_tilde = self.calculate_achievable_rate(ue_id, bs_id)
@@ -324,6 +340,11 @@ class DDPPAlgorithm:
 
         h_u, handover_count = self.compute_handover(scheduled_users)
         for ue in self.users:
+            ue_id = ue.ue_id
+
+            if h_u[ue_id] > 0.5:
+                self.ho_used_in_window[ue_id] += 1
+
             self.G_u[ue.ue_id] = max(0.0, self.G_u[ue.ue_id] + h_u[ue.ue_id] - self.kappa)
         
         return actual_rates, h_u, handover_count
@@ -462,6 +483,9 @@ class DDPPAlgorithm:
             self.bs_on_used_in_window = {
                 bs.bs_id: 0 for bs in self.base_stations
             }
+            self.ho_used_in_window = {
+                ue.ue_id: 0 for ue in self.users
+            }
         # prev_power 업데이트 -> 다음 슬롯 R_tilde 계산에 사용
         self.prev_power = {bs_id: (bs_status.get(bs_id, 0) * self.P_max[bs_id]) for bs_id in self.P_max}
 
@@ -519,8 +543,24 @@ class DDPPAlgorithm:
                     on_ratios[bs.bs_id] = on_count / 1000
 
                 ratio_str = ', '.join([f'BS{b}:{r:.2f}' for b, r in on_ratios.items()])
-                ho_count_block = float(np.mean(self.handover_count_history[-1000:]))
-                ho_ratio_block = float(np.mean(self.handover_ratio_history[-1000:]))
+                recent_ho_counts = np.asarray(self.handover_count_history[-1000:], dtype=np.float32)
+                ho_total_block = int(np.sum(recent_ho_counts))
+                block_len = len(recent_ho_counts)
+                ho_ratio_block = (ho_total_block / (block_len * len(self.users))) if block_len > 0 else 0.0
+
+                ho_used_vals = np.asarray(list(self.ho_used_in_window.values()),dtype=np.int32,)
+                ho_used_mean = float(np.mean(ho_used_vals)) if ho_used_vals.size > 0 else 0.0
+                ho_used_max = int(np.max(ho_used_vals)) if ho_used_vals.size > 0 else 0
+                ho_limit = (
+                    int(next(iter(self.hard_ho_limit.values())))
+                    if len(self.hard_ho_limit) > 0
+                    else 0
+                )
+
+                # budget을 완전히 소진하여 masking된 UE 수
+                num_ho_masked_ues = int(
+                    np.sum(ho_used_vals >= ho_limit)
+                ) if ho_used_vals.size > 0 else 0
 
                 Q_vals = np.array(list(self.Q_u.values()), dtype=float)
                 Z_vals = np.array(list(self.Z_b.values()), dtype=float)
@@ -528,11 +568,16 @@ class DDPPAlgorithm:
 
                 fair_str = "nan" if np.isnan(recent_fair) else f"{recent_fair:.3f}"
                 print(f"Slot {t+1:4d} | Thr: {recent_thr:.3f} Gbps | "
-                    f"Fair(JFI@1000): {fair_str} | ON: [{ratio_str}] | "
-                    f"HO(1000): count={ho_count_block:.3f} ratio={ho_ratio_block:.4f}/{self.kappa:.4f} | "
-                    f"Q mean/max: {np.mean(Q_vals):5.3f}/{np.max(Q_vals):5.3f} | "
-                    f"Z mean/max: {np.mean(Z_vals):5.3f}/{np.max(Z_vals):5.3f} | "
-                    f"G mean/max: {np.mean(G_vals):5.3f}/{np.max(G_vals):5.3f}")                  
+                    f"Fair(JFI@1000): {fair_str} | "
+                    f"ON: [{ratio_str}] | "
+                    f"HO: total={ho_total_block:3d} | "
+                    f"UE used avg/max={ho_used_mean:.1f}/{ho_used_max:d} | "
+                    f"limit={ho_limit:d} | "
+                    f"masked={num_ho_masked_ues:d}/{len(self.users)} | "
+                    f"ratio={ho_ratio_block:.4f}/{self.kappa:.4f} | "
+                    f"Q mean/max: {np.mean(Q_vals):5.3f} | "
+                    f"Z mean/max: {np.mean(Z_vals):5.3f} | "
+                    f"G mean/max: {np.mean(G_vals):5.3f}")                  
         print(f"\n{'='*60}")
         overall_thr = float(np.mean(self.throughput_history))
         # overall_fair = float(np.nanmean(self.recent_fair_list)) if len(self.recent_fair_list) > 0 else np.nan  # ep 전체 슬롯 기준 JFI
@@ -891,7 +936,7 @@ if __name__ == "__main__":
     area_size = 100
     num_users = 20
     max_slots = 10000
-    lambda_list = [0]
+    lambda_list = [0.0]
 
     for lambda_E in lambda_list:
         print(f"\n{'='*80}")
@@ -922,7 +967,8 @@ if __name__ == "__main__":
             max_slots=max_slots, 
             use_hard_constraint=True, 
             hard_window_len=10000, 
-            lambda_E=lambda_E
+            lambda_E=lambda_E,
+            kappa=0.03
         )
         dpp.run_simulation()
         # dpp.plot_results()

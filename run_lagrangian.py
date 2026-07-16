@@ -21,7 +21,6 @@ def make_env(
     mu_max=100.0,
     nu_max=100.0,
     use_dimensionless=True,
-    pf_avg_beta=0.99,
 ):
     set_seed(seed)
 
@@ -66,7 +65,6 @@ def make_env(
         mu_max=mu_max,
         nu_max=nu_max,
         use_dimensionless=use_dimensionless,
-        pf_avg_beta=pf_avg_beta,
 
         # dual update를 episode 단위로 하기 위한 길이
         episode_length=hard_window_len,
@@ -128,7 +126,7 @@ def save_dual_history(env, save_path):
 if __name__ == "__main__":
     seed = 0
 
-    variants = ["jensen", "pf"]
+    variants = ["pf"]
     kappa_list = [0.03]
     lambda_E = 0.0
 
@@ -160,22 +158,21 @@ if __name__ == "__main__":
                 eta_nu=eta_nu,
                 mu_max=mu_max,
                 nu_max=nu_max,
-                use_dimensionless=True,
-                pf_avg_beta=0.9,
+                use_dimensionless=False,
             )
 
             trainer_soft = make_trainer(env_soft)
 
             train_npz_path = (
-                f"{save_dir}/ConstrainedHAPPO_{variant}_train_rewards_kappa_{kappa}.npz"
+                f"{save_dir}/ConstrainedHAPPO_{variant}_train_rewards_kappa_{kappa}_use_dimensionless.npz"
             )
 
             model_path = (
-                f"{save_dir}/ConstrainedHAPPO_{variant}_model_kappa_{kappa}.pt"
+                f"{save_dir}/ConstrainedHAPPO_{variant}_model_kappa_{kappa}_use_dimensionless.pt"
             )
 
             dual_npz_path = (
-                f"{save_dir}/ConstrainedHAPPO_{variant}_dual_history_kappa_{kappa}.npz"
+                f"{save_dir}/ConstrainedHAPPO_{variant}_dual_history_kappa_{kappa}_use_dimensionless.npz"
             )
 
             trainer_soft.train(
@@ -202,15 +199,14 @@ if __name__ == "__main__":
                 eta_nu=eta_nu,
                 mu_max=mu_max,
                 nu_max=nu_max,
-                use_dimensionless=True,
-                pf_avg_beta=0.9,
+                use_dimensionless=False,
             )
 
             trainer_hard = make_trainer(env_hard)
             trainer_hard.load_model(model_path)
 
             hard_eval_npz_path = (
-                f"{save_dir}/ConstrainedHAPPO_{variant}_eval_hard_kappa_{kappa}.npz"
+                f"{save_dir}/ConstrainedHAPPO_{variant}_eval_hard_kappa_{kappa}_use_dimensionless.npz"
             )
 
             trainer_hard.evaluate(
