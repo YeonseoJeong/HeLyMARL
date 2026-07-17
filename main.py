@@ -47,9 +47,10 @@ def make_env(seed, V, lambda_E, kappa, use_hard_constraint, hard_window_len=1000
 # ============================================================
 # Trainer
 # ============================================================
-def make_trainer(env):
+def make_trainer(env, eval_env = None):
     return HAPPOTrainer(
         env=env,
+        eval_env=eval_env,
         lr_actor_ue=3e-4,
         lr_actor_bs=3e-4,
         lr_critic=1e-3,
@@ -65,11 +66,9 @@ def make_trainer(env):
 
 if __name__ == "__main__":
     seed = 0
-    train_V = 5.0
-
-    eval_V_list = [5.0, 10.0, 20.0, 50.0]
-
-    kappa = 0.03
+    checkpoint_eval_seeds = [1000,1001,1002,]
+    v = 5.0
+    kappa_list = [0.03]
     lambda_E = 0.0
 
     steps_per_episode = 10000
@@ -77,41 +76,67 @@ if __name__ == "__main__":
     eval_episode = 1
     update_interval = 128
 
-    os.makedirs("results/results_V_sweep", exist_ok=True)
+    save_dir = "results/policy_improvement/HeLyMARL"
+    os.makedirs(save_dir, exist_ok=True)
 
-    train_npz_path = f"results/results_V_sweep/HeLyMARL_train_rewards_V_{train_V}.npz"
-    model_path = f"results/results_V_sweep/HeLyMARL_model_V_{train_V}.pt"
+    for kappa in kappa_list:
+        print(f"\n=== Training with kappa = {kappa} ===")
 
-    # ========================================================
-    # 1. Train only once with V = 5
-    # ========================================================
-    print("=" * 80)
-    print(f"Training HeLyMARL with V = {train_V:g}")
-    print("=" * 80)
+        env_soft = make_env(
+            seed=seed,
+            V=v,
+            lambda_E=lambda_E,
+            kappa=kappa,
+            use_hard_constraint=False,
+            hard_window_len=steps_per_episode,
+        )
 
-    env_soft = make_env(seed=seed, V=train_V, lambda_E=lambda_E, kappa=kappa, use_hard_constraint=False, hard_window_len=steps_per_episode)
-    trainer_soft = make_trainer(env_soft)
+        env_checkpoint_eval = make_env(
+            seed=checkpoint_eval_seeds[0],
+            V=v,
+            lambda_E=lambda_E,
+            kappa=kappa,
+            use_hard_constraint=True,
+            hard_window_len=steps_per_episode,
+        )
 
-    trainer_soft.train(
-        n_episodes=train_episodes,
-        steps_per_episode=steps_per_episode,
-        update_interval=update_interval,
-        save_npz_path=train_npz_path
-    )
+        set_seed(seed)
+        
+        trainer_soft = make_trainer(env_soft, eval_env = env_checkpoint_eval)
 
-    trainer_soft.save_model(model_path)
+        train_npz_path = f"{save_dir}/HeLyMARL_policy_improvement_lambda_{lambda_E}.npz"
+        model_path = f"{save_dir}/HeLyMARL_final_model_lambda_{lambda_E}.pt"
 
-    # ========================================================
-    # 2. Evaluate the same trained model with different V
-    # ========================================================
-    for eval_V in eval_V_list:
-        print(f"\n=== Hard Eval with V = {eval_V} ===")
+        trainer_soft.train(
+            n_episodes=train_episodes,
+            steps_per_episode=steps_per_episode,
+            update_interval=update_interval,
+            save_npz_path=train_npz_path,
+            eval_every=0,
+            eval_n_episodes=len(checkpoint_eval_seeds),
+            eval_steps_per_episode=steps_per_episode,
+            eval_seeds=checkpoint_eval_seeds,
+            eval_deterministic=True,
+            policy_improvement_dir=f"{save_dir}/checkpoints",
+            checkpoint_every_updates_early=8,
+            checkpoint_every_updates_mid=40,
+            checkpoint_every_updates_late=80,
+            checkpoint_early_until_step=10000,
+            checkpoint_mid_until_step=50000,
+            save_episode_end_checkpoint=True,
+        )
 
-        env_hard = make_env(seed=seed, V=eval_V, lambda_E=lambda_E, kappa=kappa, use_hard_constraint=True, hard_window_len=steps_per_episode)
+        final_eval_seed = 2000
+        trainer_soft.save_model(model_path)
+    
+        print(f"\n=== Hard Eval with kappa = {kappa} ===")
+
+        env_hard = make_env(seed=final_eval_seed, V = v, lambda_E = lambda_E, kappa=kappa, use_hard_constraint=True, hard_window_len=steps_per_episode)
         trainer_hard = make_trainer(env_hard)
         trainer_hard.load_model(model_path)
+        set_seed(final_eval_seed)
         
-        hard_eval_npz_path = f"results/results_V_sweep/HeLyMARL_eval_hard_V_{eval_V}.npz"
+        hard_eval_npz_path = f"{save_dir}/HeLyMARL_final_eval_lambda_{lambda_E}.npz"
         
         trainer_hard.evaluate(
             n_episodes=eval_episode,

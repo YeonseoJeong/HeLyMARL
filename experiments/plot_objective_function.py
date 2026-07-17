@@ -1,0 +1,370 @@
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# Plot settings
+# ============================================================
+plt.rcParams.update({
+    "font.family": "Times New Roman",
+    "mathtext.fontset": "stix",
+    "font.size": 13,
+    "axes.labelsize": 17,
+    "legend.fontsize": 12,
+    "xtick.labelsize": 13,
+    "ytick.labelsize": 13,
+    "axes.linewidth": 1.4,
+    "lines.linewidth": 2.2,
+})
+
+
+def load_policy_improvement_objective(npz_path):
+    """
+    Training NPZ에서 학습 전 policy와
+    episode 내부 checkpoint policy의 evaluation objective를 불러온다.
+
+    Required keys
+    -------------
+    policy_eval_steps
+    policy_eval_objective_mean
+
+    Optional keys
+    -------------
+    policy_eval_objective_std
+    policy_eval_episodes
+    policy_eval_updates
+    """
+    if not os.path.exists(npz_path):
+        raise FileNotFoundError(
+            f"NPZ file not found: {npz_path}"
+        )
+
+    with np.load(npz_path, allow_pickle=True) as data:
+        print(f"\n[{os.path.basename(npz_path)}]")
+        print("Available keys:")
+        print(data.files)
+
+        required_keys = [
+            "policy_eval_steps",
+            "policy_eval_objective_mean",
+        ]
+
+        missing_keys = [
+            key
+            for key in required_keys
+            if key not in data
+        ]
+
+        if missing_keys:
+            raise KeyError(
+                f"Missing keys in {npz_path}: {missing_keys}\n"
+                "새 policy improvement trainer로 학습했는지 확인해야 합니다."
+            )
+
+        train_steps = np.asarray(
+            data["policy_eval_steps"],
+            dtype=np.int64,
+        ).reshape(-1)
+
+        objective_mean = np.asarray(
+            data["policy_eval_objective_mean"],
+            dtype=np.float64,
+        ).reshape(-1)
+
+
+        # Gbps-based objective -> bps-based objective
+        # objective_mean = (
+        #     objective_mean
+        #     + 20 * np.log(1e9)
+        # )
+
+        if "policy_eval_objective_std" in data:
+            objective_std = np.asarray(
+                data["policy_eval_objective_std"],
+                dtype=np.float64,
+            ).reshape(-1)
+        else:
+            objective_std = np.zeros_like(
+                objective_mean,
+                dtype=np.float64,
+            )
+
+        if "policy_eval_episodes" in data:
+            episodes = np.asarray(
+                data["policy_eval_episodes"],
+                dtype=np.int32,
+            ).reshape(-1)
+        else:
+            episodes = np.full(
+                len(train_steps),
+                -1,
+                dtype=np.int32,
+            )
+
+        if "policy_eval_updates" in data:
+            updates = np.asarray(
+                data["policy_eval_updates"],
+                dtype=np.int32,
+            ).reshape(-1)
+        else:
+            updates = np.full(
+                len(train_steps),
+                -1,
+                dtype=np.int32,
+            )
+
+    lengths = [
+        len(train_steps),
+        len(objective_mean),
+        len(objective_std),
+        len(episodes),
+        len(updates),
+    ]
+
+    if len(set(lengths)) != 1:
+        raise ValueError(
+            "policy evaluation 관련 배열의 길이가 서로 다릅니다."
+        )
+
+    valid_mask = (
+        np.isfinite(train_steps)
+        & np.isfinite(objective_mean)
+        & np.isfinite(objective_std)
+    )
+
+    train_steps = train_steps[valid_mask]
+    objective_mean = objective_mean[valid_mask]
+    objective_std = objective_std[valid_mask]
+    episodes = episodes[valid_mask]
+    updates = updates[valid_mask]
+
+    # 혹시 저장 순서가 뒤섞였을 경우 step 순으로 정렬
+    order = np.argsort(train_steps)
+
+    return (
+        train_steps[order],
+        objective_mean[order],
+        objective_std[order],
+        episodes[order],
+        updates[order],
+    )
+
+
+def plot_policy_improvement_objective(
+    npz_paths,
+    save_path,
+    show_std=True,
+    steps_per_episode=10000,
+    x_scale=1000.0,
+):
+    """
+    Parameters
+    ----------
+    npz_paths : dict
+        {
+            "PF-HAPPO": "path/to/policy_improvement.npz",
+            "Jensen-HAPPO": "path/to/policy_improvement.npz",
+            "HeLyMARL": "path/to/policy_improvement.npz",
+        }
+
+    save_path : str
+        저장할 그림 경로
+
+    show_std : bool
+        evaluation seed 간 objective std 음영 표시 여부
+
+    steps_per_episode : int
+        episode 경계 표시용
+
+    x_scale : float
+        x축 scaling.
+        1000이면 Training Steps (x 10^3)로 표시
+    """
+    os.makedirs(
+        os.path.dirname(save_path)
+        if os.path.dirname(save_path)
+        else ".",
+        exist_ok=True,
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(7.8, 5.3)
+    )
+
+    plotted = False
+    all_train_steps = []
+
+    for algorithm, npz_path in npz_paths.items():
+        try:
+            (
+                train_steps,
+                objective_mean,
+                objective_std,
+                episodes,
+                updates,
+            ) = load_policy_improvement_objective(npz_path)
+
+        except (FileNotFoundError, KeyError, ValueError) as error:
+            print(f"[Warning] {algorithm}: {error}")
+            continue
+
+        if len(train_steps) == 0:
+            print(
+                f"[Warning] Empty objective data: {algorithm}"
+            )
+            continue
+
+        x = train_steps / x_scale
+
+        ax.plot(
+            x,
+            objective_mean,
+            marker="o",
+            markersize=4.5,
+            linewidth=2.2,
+            label=algorithm,
+        )
+
+        if (
+            show_std
+            and len(objective_std) > 0
+            and np.any(objective_std > 0)
+        ):
+            lower = objective_mean - objective_std
+            upper = objective_mean + objective_std
+
+            ax.fill_between(
+                x,
+                lower,
+                upper,
+                alpha=0.18,
+            )
+
+        print(f"\n{algorithm}")
+        print("=" * 85)
+
+        for step, ep, update, mean, std in zip(
+            train_steps,
+            episodes,
+            updates,
+            objective_mean,
+            objective_std,
+        ):
+            print(
+                f"Step {int(step):7d} | "
+                f"Episode {int(ep):3d} | "
+                f"Update {int(update):4d} | "
+                f"Objective = {mean:.6f} | "
+                f"Std = {std:.6f}"
+            )
+
+        all_train_steps.extend(
+            train_steps.tolist()
+        )
+
+        plotted = True
+
+    if not plotted:
+        plt.close(fig)
+        raise RuntimeError(
+            "그릴 수 있는 policy improvement objective 데이터가 없습니다."
+        )
+
+    ax.set_xlabel(
+        r"Training Environment Steps ($\times 10^3$)"
+    )
+    ax.set_ylabel(
+        "Evaluation Objective"
+    )
+
+    # --------------------------------------------------------
+    # Episode boundary 표시
+    # --------------------------------------------------------
+    max_train_step = int(np.max(all_train_steps))
+
+    episode_boundaries = np.arange(
+        steps_per_episode,
+        max_train_step + 1,
+        steps_per_episode,
+    )
+
+    for boundary in episode_boundaries:
+        ax.axvline(
+            boundary / x_scale,
+            color="gray",
+            linestyle=":",
+            linewidth=0.9,
+            alpha=0.45,
+            zorder=0,
+        )
+
+    # 학습 전 policy가 step 0이므로 x축도 0부터 시작
+    ax.set_xlim(
+        left=0.0,
+        right=max_train_step / x_scale,
+    )
+
+    ax.grid(
+        True,
+        alpha=0.3,
+        linestyle="--",
+    )
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    ax.legend(
+        loc="lower right",
+        frameon=False,
+    )
+
+    fig.tight_layout()
+
+    fig.savefig(
+        save_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close(fig)
+
+    print(
+        f"\n✅ Saved policy improvement plot: "
+        f"{save_path}"
+    )
+
+
+if __name__ == "__main__":
+
+    NPZ_PATHS = {
+        "PF-HAPPO": (
+            "results/policy_improvement/pf/"
+            "ConstrainedHAPPO_pf_policy_improvement_"
+            "kappa_0.03.npz"
+        ),
+
+        "Jensen-HAPPO": (
+            "results/policy_improvement/jensen/"
+            "ConstrainedHAPPO_jensen_policy_improvement_"
+            "kappa_0.03.npz"
+        ),
+
+        "HeLyMARL": (
+            "results/policy_improvement/HeLyMARL/"
+            "HeLyMARL_policy_improvement_lambda_0.0.npz"
+        ),
+    }
+
+    SAVE_PATH = (
+        "eval_compare_plots/"
+        "evaluation_objective_vs_training_episode.png"
+    )
+
+    plot_policy_improvement_objective(
+        npz_paths=NPZ_PATHS,
+        save_path=SAVE_PATH,
+        show_std=True,
+        steps_per_episode=10000,
+        x_scale=1000.0,
+    )

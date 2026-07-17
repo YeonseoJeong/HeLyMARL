@@ -1,4 +1,5 @@
 import os
+import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -14,13 +15,14 @@ from HeLyMARL.networks_happo import (
     CentralizedCritic,
     ValueNorm
 )
-from HeLyMARL.utils_happo import moving_avg, block_avg_1d
+from HeLyMARL.utils_happo import moving_avg, block_avg_1d, set_seed
 
 
 class HAPPOTrainer:
     def __init__(
         self,
         env,
+        eval_env=None,
         lr_actor_ue: float = 3e-4,
         lr_actor_bs: float = 3e-4,
         lr_critic: float = 1e-3,
@@ -35,6 +37,7 @@ class HAPPOTrainer:
         minibatch_size: int = 256,
     ):
         self.env = env
+        self.eval_env = eval_env
         self.gamma = float(gamma)
         self.gae_lambda = float(gae_lambda)
         self.clip_epsilon = float(clip_epsilon)
@@ -148,39 +151,119 @@ class HAPPOTrainer:
         }
 
     @torch.no_grad()
-    def select_actions(self, local_obs: Dict[int, np.ndarray], global_obs: np.ndarray):
-        users = self.env.users
-        global_t = torch.as_tensor(global_obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+    def select_actions(
+        self,
+        local_obs: Dict[int, np.ndarray],
+        global_obs: np.ndarray,
+        env=None,
+        deterministic: bool = False,
+    ):
+        run_env = self.env if env is None else env
+        users = run_env.users
+
+        global_t = torch.as_tensor(
+            global_obs,
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
 
         v_n = self.critic(global_t).squeeze(0)
 
+        # ==================================================
         # UE actions
-        obs_batch = np.stack([local_obs[u.ue_id] for u in users], axis=0).astype(np.float32)
-        ue_mask_batch = np.stack([self.env._get_action_mask(u.ue_id) for u in users], axis=0).astype(bool)
+        # ==================================================
+        obs_batch = np.stack(
+            [
+                local_obs[u.ue_id]
+                for u in users
+            ],
+            axis=0,
+        ).astype(np.float32)
 
-        obs_t = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
-        ue_mask_t = torch.as_tensor(ue_mask_batch, dtype=torch.bool, device=self.device)
+        ue_mask_batch = np.stack(
+            [
+                run_env._get_action_mask(u.ue_id)
+                for u in users
+            ],
+            axis=0,
+        ).astype(bool)
 
-        ue_logits = self.ue_actor(obs_t).masked_fill(~ue_mask_t, float("-inf"))
+        obs_t = torch.as_tensor(
+            obs_batch,
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        ue_mask_t = torch.as_tensor(
+            ue_mask_batch,
+            dtype=torch.bool,
+            device=self.device,
+        )
+
+        ue_logits = self.ue_actor(obs_t).masked_fill(
+            ~ue_mask_t,
+            float("-inf"),
+        )
+
         ue_dist = Categorical(logits=ue_logits)
-        ue_actions_t = ue_dist.sample()
+
+        if deterministic:
+            ue_actions_t = torch.argmax(
+                ue_logits,
+                dim=-1,
+            )
+        else:
+            ue_actions_t = ue_dist.sample()
+
         ue_logp_t = ue_dist.log_prob(ue_actions_t)
         ue_ent_t = ue_dist.entropy()
 
-        ue_actions = {u.ue_id: int(ue_actions_t[i].item()) for i, u in enumerate(users)}
+        ue_actions = {
+            u.ue_id: int(ue_actions_t[i].item())
+            for i, u in enumerate(users)
+        }
 
+        # ==================================================
         # BS actions
-        bs_obs_batch, bs_mask_batch, cand_lists = self.env.build_bs_decision_inputs(ue_actions)
-        bs_obs_t = torch.as_tensor(bs_obs_batch, dtype=torch.float32, device=self.device)
-        bs_mask_t = torch.as_tensor(bs_mask_batch, dtype=torch.bool, device=self.device)
+        # ==================================================
+        bs_obs_batch, bs_mask_batch, cand_lists = (
+            run_env.build_bs_decision_inputs(ue_actions)
+        )
 
-        bs_logits = self.bs_actor(bs_obs_t).masked_fill(~bs_mask_t, float("-inf"))
+        bs_obs_t = torch.as_tensor(
+            bs_obs_batch,
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        bs_mask_t = torch.as_tensor(
+            bs_mask_batch,
+            dtype=torch.bool,
+            device=self.device,
+        )
+
+        bs_logits = self.bs_actor(bs_obs_t).masked_fill(
+            ~bs_mask_t,
+            float("-inf"),
+        )
+
         bs_dist = Categorical(logits=bs_logits)
-        bs_actions_t = bs_dist.sample()
+
+        if deterministic:
+            bs_actions_t = torch.argmax(
+                bs_logits,
+                dim=-1,
+            )
+        else:
+            bs_actions_t = bs_dist.sample()
+
         bs_logp_t = bs_dist.log_prob(bs_actions_t)
         bs_ent_t = bs_dist.entropy()
 
-        bs_actions = {bs.bs_id: int(bs_actions_t[i].item()) for i, bs in enumerate(self.env.base_stations)}
+        bs_actions = {
+            bs.bs_id: int(bs_actions_t[i].item())
+            for i, bs in enumerate(run_env.base_stations)
+        }
 
         return (
             ue_actions,
@@ -197,7 +280,204 @@ class HAPPOTrainer:
 
             float(v_n.item()),
         )
+    
+    @torch.no_grad()
+    def evaluate_current_policy_objective(
+        self,
+        n_eval_episodes: int,
+        steps_per_episode: int,
+        objective_eps: float = 1e-12,
+        eval_seeds=None,
+        deterministic: bool = False,
+    ):
+        if self.eval_env is None:
+            raise ValueError(
+                "eval_env가 설정되지 않았습니다. "
+                "Training env와 별도의 evaluation env를 전달해야 합니다."
+            )
 
+        eval_env = self.eval_env
+
+        # ------------------------------------------------------
+        # 모든 checkpoint에서 동일한 evaluation seed 사용
+        # ------------------------------------------------------
+        if eval_seeds is None:
+            eval_seeds = [
+                1000 + i
+                for i in range(n_eval_episodes)
+            ]
+
+        eval_seeds = list(eval_seeds)
+
+        if len(eval_seeds) != n_eval_episodes:
+            raise ValueError(
+                f"n_eval_episodes={n_eval_episodes}인데 "
+                f"eval_seeds 길이는 {len(eval_seeds)}입니다."
+            )
+
+        # ------------------------------------------------------
+        # Evaluation이 training의 RNG 흐름을 바꾸지 않도록 저장
+        # ------------------------------------------------------
+        python_rng_state = random.getstate()
+        numpy_rng_state = np.random.get_state()
+        torch_rng_state = torch.get_rng_state()
+
+        if torch.cuda.is_available():
+            cuda_rng_state = torch.cuda.get_rng_state_all()
+        else:
+            cuda_rng_state = None
+
+        # 기존 network mode 저장
+        ue_was_training = self.ue_actor.training
+        bs_was_training = self.bs_actor.training
+        critic_was_training = self.critic.training
+
+        objective_values = []
+
+        try:
+            self.ue_actor.eval()
+            self.bs_actor.eval()
+            self.critic.eval()
+
+            for eval_ep, eval_seed in enumerate(eval_seeds):
+                # 각 checkpoint마다 항상 동일한 seed 집합 사용
+                set_seed(int(eval_seed))
+
+                local_obs, global_obs = eval_env.reset()
+
+                ep_slot_rates = []
+
+                for eval_step in range(steps_per_episode):
+                    (
+                        ue_actions,
+                        _ue_logp_np,
+                        _ue_ent_np,
+                        _ue_masks_np,
+                        bs_actions,
+                        _bs_logp_np,
+                        _bs_ent_np,
+                        _bs_obs_np,
+                        _bs_masks_np,
+                        cand_lists,
+                        _v_n,
+                    ) = self.select_actions(
+                        local_obs=local_obs,
+                        global_obs=global_obs,
+                        env=eval_env,
+
+                        # stochastic action sampling
+                        deterministic=deterministic,
+                    )
+
+                    (
+                        next_local_obs,
+                        next_global_obs,
+                        info,
+                        done,
+                    ) = eval_env.step_joint(
+                        ue_actions=ue_actions,
+                        bs_actions=bs_actions,
+                        cand_lists=cand_lists,
+                    )
+
+                    rates_this_slot = np.asarray(
+                        [
+                            float(
+                                info["served_rates"][u.ue_id]
+                            )
+                            for u in eval_env.users
+                        ],
+                        dtype=np.float64,
+                    )
+
+                    ep_slot_rates.append(rates_this_slot)
+
+                    local_obs = next_local_obs
+                    global_obs = next_global_obs
+
+                    if done:
+                        break
+
+                ep_slot_rates = np.asarray(
+                    ep_slot_rates,
+                    dtype=np.float64,
+                )
+
+                if (
+                    ep_slot_rates.ndim != 2
+                    or ep_slot_rates.shape[0] == 0
+                ):
+                    objective = np.nan
+
+                else:
+                    avg_user_rates = np.mean(
+                        ep_slot_rates,
+                        axis=0,
+                    )
+
+                    objective = float(
+                        np.sum(
+                            np.log(
+                                np.maximum(
+                                    avg_user_rates,
+                                    objective_eps,
+                                )
+                            )
+                        )
+                    )
+
+                objective_values.append(objective)
+
+            objective_values = np.asarray(
+                objective_values,
+                dtype=np.float64,
+            )
+
+            finite_values = objective_values[
+                np.isfinite(objective_values)
+            ]
+
+            if finite_values.size > 0:
+                objective_mean = float(
+                    np.mean(finite_values)
+                )
+
+                objective_std = float(
+                    np.std(finite_values)
+                )
+
+            else:
+                objective_mean = np.nan
+                objective_std = np.nan
+
+        finally:
+            # --------------------------------------------------
+            # Evaluation 전 training RNG 상태로 복원
+            # --------------------------------------------------
+            random.setstate(python_rng_state)
+            np.random.set_state(numpy_rng_state)
+            torch.set_rng_state(torch_rng_state)
+
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state_all(
+                    cuda_rng_state
+                )
+
+            # 기존 network mode 복원
+            self.ue_actor.train(ue_was_training)
+            self.bs_actor.train(bs_was_training)
+            self.critic.train(critic_was_training)
+
+        return {
+            "objective_values": objective_values,
+            "objective_mean": objective_mean,
+            "objective_std": objective_std,
+            "eval_seeds": np.asarray(
+                eval_seeds,
+                dtype=np.int32,
+            ),
+        }
+    
     def store_step(
         self,
         local_obs, global_obs,
@@ -417,12 +697,26 @@ class HAPPOTrainer:
     # =========================================================
     # Train / Eval
     # =========================================================
-    def train(self, 
-              n_episodes: int,
-              steps_per_episode: int,
-              update_interval: int = 128,
-              save_npz_path: Optional[str] = None
-        ):
+    def train(self,
+        n_episodes: int,
+        steps_per_episode: int,
+        update_interval: int = 128,
+        save_npz_path: Optional[str] = None,
+        eval_every: int = 1,
+        eval_n_episodes: int = 3,
+        eval_steps_per_episode: Optional[int] = None,
+        eval_seeds: Optional[list] = None,
+        eval_deterministic: bool = False,
+        policy_improvement_dir: Optional[str] = None,
+        checkpoint_every_updates_early: int = 8,
+        checkpoint_every_updates_mid: int = 40,
+        checkpoint_every_updates_late: int = 80,
+        checkpoint_early_until_step: int = 10000,
+        checkpoint_mid_until_step: int = 50000,
+        save_episode_end_checkpoint: bool = True,
+    ):
+        if eval_steps_per_episode is None:
+            eval_steps_per_episode = steps_per_episode
 
         print(f"\n{'='*100}")
         print(" HAPPO Training - Episodic")
@@ -464,6 +758,21 @@ class HAPPOTrainer:
 
         # optional: episode-level summaries
         episode_reward_history = []
+        
+        # Episode 종료 시 최종 정책 평가
+        eval_episode_idx_history = []
+        eval_objective_mean_history = []
+        eval_objective_std_history = []
+
+        # Policy-improvement checkpoints: initial policy + intermediate policies
+        policy_eval_step_history = []
+        policy_eval_episode_history = []
+        policy_eval_update_history = []
+        policy_eval_objective_mean_history = []
+        policy_eval_objective_std_history = []
+        policy_eval_objective_values_history = []
+        policy_checkpoint_path_history = []
+
         episode_Q_last_history = []
         episode_Z_last_history = []
         episode_G_last_history = []
@@ -476,6 +785,78 @@ class HAPPOTrainer:
         episode_C_H_last_history = []
 
         global_step = 0
+        update_count = 0
+        saved_checkpoint_steps = set()
+
+        if policy_improvement_dir is not None:
+            os.makedirs(policy_improvement_dir, exist_ok=True)
+
+        def _checkpoint_interval_updates(step: int) -> int:
+            if step <= checkpoint_early_until_step:
+                return max(1, int(checkpoint_every_updates_early))
+            if step <= checkpoint_mid_until_step:
+                return max(1, int(checkpoint_every_updates_mid))
+            return max(1, int(checkpoint_every_updates_late))
+
+        def _save_and_evaluate_policy_checkpoint(
+            step: int,
+            episode_idx: int,
+            current_update_count: int,
+            label: str,
+        ):
+            if step in saved_checkpoint_steps:
+                return
+
+            checkpoint_path = ""
+            if policy_improvement_dir is not None:
+                checkpoint_path = os.path.join(
+                    policy_improvement_dir,
+                    f"checkpoint_step_{step:07d}_{label}.pt",
+                )
+                self.save_model(checkpoint_path, save_optim=False)
+
+            if self.eval_env is not None:
+                eval_result = self.evaluate_current_policy_objective(
+                    n_eval_episodes=eval_n_episodes,
+                    steps_per_episode=eval_steps_per_episode,
+                    eval_seeds=eval_seeds,
+                    deterministic=eval_deterministic,
+                )
+
+                policy_eval_step_history.append(int(step))
+                policy_eval_episode_history.append(int(episode_idx))
+                policy_eval_update_history.append(int(current_update_count))
+                policy_eval_objective_mean_history.append(
+                    float(eval_result["objective_mean"])
+                )
+                policy_eval_objective_std_history.append(
+                    float(eval_result["objective_std"])
+                )
+                policy_eval_objective_values_history.append(
+                    np.asarray(
+                        eval_result["objective_values"],
+                        dtype=np.float64,
+                    )
+                )
+                policy_checkpoint_path_history.append(checkpoint_path)
+
+                print(
+                    f"[POLICY CHECKPOINT] Step {step:7d} | "
+                    f"Episode {episode_idx:4d} | "
+                    f"Update {current_update_count:5d} | "
+                    f"Objective {eval_result['objective_mean']:.6f} "
+                    f"± {eval_result['objective_std']:.6f}"
+                )
+
+            saved_checkpoint_steps.add(int(step))
+
+        # Step 0: policy before any PPO/HAPPO update
+        _save_and_evaluate_policy_checkpoint(
+            step=0,
+            episode_idx=0,
+            current_update_count=0,
+            label="initial",
+        )
 
         for ep in range(n_episodes):
             # --------------------------------------------------
@@ -487,6 +868,9 @@ class HAPPOTrainer:
             self.reset_rollout()
 
             ep_reward_sum = 0.0
+            # Objective calculation for this episode
+            ep_slot_rates = []
+            ep_energy_cost = []
 
             for ep_step in range(steps_per_episode):
                 global_step += 1
@@ -499,6 +883,43 @@ class HAPPOTrainer:
                     bs_actions=bs_actions,
                     cand_lists=cand_lists
                 )
+
+                # --------------------------------------------------
+                # Store per-user served rates for episode objective
+                # --------------------------------------------------
+                rates_this_slot = np.asarray(
+                    [
+                        float(info["served_rates"][u.ue_id])
+                        for u in self.env.users
+                    ],
+                    dtype=np.float64,
+                )
+
+                ep_slot_rates.append(rates_this_slot)
+
+                # Energy cost at this slot
+                power_consumed = info.get("power_consumed", {})
+
+                if isinstance(power_consumed, dict):
+                    slot_energy_cost = float(
+                        np.sum([
+                            float(power_consumed[bs.bs_id])
+                            for bs in self.env.base_stations
+                        ])
+                    )
+                else:
+                    power_array = np.asarray(
+                        power_consumed,
+                        dtype=np.float64,
+                    ).reshape(-1)
+
+                    slot_energy_cost = (
+                        float(np.sum(power_array))
+                        if power_array.size > 0
+                        else 0.0
+                    )
+
+                ep_energy_cost.append(slot_energy_cost)
 
                 handover_u = info.get("handover_u", {})
 
@@ -591,6 +1012,8 @@ class HAPPOTrainer:
                         entropy_ue_history.append(float(losses["entropy_ue"]))
                         entropy_bs_history.append(float(losses["entropy_bs"]))
 
+                        update_count += 1
+
                         print(
                             f"[UPDATE] Ep {ep+1:4d} | "
                             f"EpStep {ep_step+1:5d}/{steps_per_episode} | "
@@ -601,6 +1024,15 @@ class HAPPOTrainer:
                             f"Ent(UE):{losses['entropy_ue']:.4f} | "
                             f"Ent(BS):{losses['entropy_bs']:.4f}"
                         )
+
+                        interval_updates = _checkpoint_interval_updates(global_step)
+                        if update_count % interval_updates == 0:
+                            _save_and_evaluate_policy_checkpoint(
+                                step=global_step,
+                                episode_idx=ep + 1,
+                                current_update_count=update_count,
+                                label="intermediate",
+                            )
 
                 # --------------------------------------------------
                 # Light progress logging
@@ -674,11 +1106,76 @@ class HAPPOTrainer:
                     f"Last Gmean:{episode_G_last_history[-1]:.3f}"
                 )       
 
+            if save_episode_end_checkpoint:
+                _save_and_evaluate_policy_checkpoint(
+                    step=global_step,
+                    episode_idx=ep + 1,
+                    current_update_count=update_count,
+                    label=f"episode_{ep + 1:04d}_end",
+                )
+
+            # ==================================================
+            # Legacy episode-level evaluation history
+            # ==================================================
+            if (
+                self.eval_env is not None
+                and eval_every > 0
+                and (ep + 1) % eval_every == 0
+            ):
+                eval_result = self.evaluate_current_policy_objective(
+                    n_eval_episodes=eval_n_episodes,
+                    steps_per_episode=eval_steps_per_episode,
+                    eval_seeds=eval_seeds,
+                    deterministic=eval_deterministic
+                )
+
+                eval_episode_idx_history.append(
+                    ep + 1
+                )
+
+                eval_objective_mean_history.append(
+                    eval_result["objective_mean"]
+                )
+
+                eval_objective_std_history.append(
+                    eval_result["objective_std"]
+                )
+
+                print(
+                    f"[POLICY EVAL] Ep {ep+1:4d} | "
+                    f"Objective:"
+                    f"{eval_result['objective_mean']:.6f} "
+                    f"± {eval_result['objective_std']:.6f} | "
+                    f"EvalEpisodes:{eval_n_episodes} | "
+                    f"Seeds:{list(eval_result['eval_seeds'])}"
+                )
+
         results = {
             # reward / queue
             "global_reward": global_reward_history,
             "handover_ratio": handover_ratio_history,
             "episode_handover_ratio": episode_handover_ratio_history,
+
+            # final-policy evaluation objective
+            "eval_episode_idx_history":
+                eval_episode_idx_history,
+            "eval_objective_mean_history":
+                eval_objective_mean_history,
+            "eval_objective_std_history":
+                eval_objective_std_history,
+
+            # step-wise policy-improvement evaluation
+            "policy_eval_step_history": policy_eval_step_history,
+            "policy_eval_episode_history": policy_eval_episode_history,
+            "policy_eval_update_history": policy_eval_update_history,
+            "policy_eval_objective_mean_history":
+                policy_eval_objective_mean_history,
+            "policy_eval_objective_std_history":
+                policy_eval_objective_std_history,
+            "policy_eval_objective_values_history":
+                policy_eval_objective_values_history,
+            "policy_checkpoint_path_history":
+                policy_checkpoint_path_history,
 
             # loss curves
             "update_step_history": update_step_history,
@@ -1054,6 +1551,68 @@ class HAPPOTrainer:
         # =====================================================
         if tag == "train":
             episode_reward = np.asarray(results.get("episode_reward_history", []), dtype=np.float32)
+            eval_episode_idx = np.asarray(
+                results.get(
+                    "eval_episode_idx_history",
+                    [],
+                ),
+                dtype=np.int32,
+            )
+
+            eval_objective_mean = np.asarray(
+                results.get(
+                    "eval_objective_mean_history",
+                    [],
+                ),
+                dtype=np.float32,
+            )
+
+            eval_objective_std = np.asarray(
+                results.get(
+                    "eval_objective_std_history",
+                    [],
+                ),
+                dtype=np.float32,
+            )
+
+            policy_eval_steps = np.asarray(
+                results.get("policy_eval_step_history", []),
+                dtype=np.int64,
+            )
+            policy_eval_episodes = np.asarray(
+                results.get("policy_eval_episode_history", []),
+                dtype=np.int32,
+            )
+            policy_eval_updates = np.asarray(
+                results.get("policy_eval_update_history", []),
+                dtype=np.int32,
+            )
+            policy_eval_objective_mean = np.asarray(
+                results.get("policy_eval_objective_mean_history", []),
+                dtype=np.float32,
+            )
+            policy_eval_objective_std = np.asarray(
+                results.get("policy_eval_objective_std_history", []),
+                dtype=np.float32,
+            )
+            raw_policy_values = results.get(
+                "policy_eval_objective_values_history",
+                [],
+            )
+            if len(raw_policy_values) > 0:
+                policy_eval_objective_values = np.stack(
+                    raw_policy_values,
+                    axis=0,
+                ).astype(np.float32)
+            else:
+                policy_eval_objective_values = np.empty(
+                    (0, 0),
+                    dtype=np.float32,
+                )
+            policy_checkpoint_paths = np.asarray(
+                results.get("policy_checkpoint_path_history", []),
+                dtype=str,
+            )
 
             if is_constrained:
                 mu_E_mean = np.asarray(results.get("mu_E_mean_history", []), dtype=np.float32)
@@ -1079,6 +1638,18 @@ class HAPPOTrainer:
                     global_reward=global_reward,
                     reward_x_500=reward_x_500,
                     global_reward_500=global_reward_500,
+
+                    eval_episode_idx=eval_episode_idx,
+                    eval_objective_mean=eval_objective_mean,
+                    eval_objective_std=eval_objective_std,
+
+                    policy_eval_steps=policy_eval_steps,
+                    policy_eval_episodes=policy_eval_episodes,
+                    policy_eval_updates=policy_eval_updates,
+                    policy_eval_objective_mean=policy_eval_objective_mean,
+                    policy_eval_objective_std=policy_eval_objective_std,
+                    policy_eval_objective_values=policy_eval_objective_values,
+                    policy_checkpoint_paths=policy_checkpoint_paths,
 
                     handover_ratio=handover_ratio,
                     episode_handover_ratio=episode_handover_ratio,
@@ -1123,6 +1694,18 @@ class HAPPOTrainer:
                     global_reward=global_reward,
                     reward_x_500=reward_x_500,
                     global_reward_500=global_reward_500,
+
+                    eval_episode_idx=eval_episode_idx,
+                    eval_objective_mean=eval_objective_mean,
+                    eval_objective_std=eval_objective_std,
+
+                    policy_eval_steps=policy_eval_steps,
+                    policy_eval_episodes=policy_eval_episodes,
+                    policy_eval_updates=policy_eval_updates,
+                    policy_eval_objective_mean=policy_eval_objective_mean,
+                    policy_eval_objective_std=policy_eval_objective_std,
+                    policy_eval_objective_values=policy_eval_objective_values,
+                    policy_checkpoint_paths=policy_checkpoint_paths,
 
                     handover_ratio=handover_ratio,
                     episode_handover_ratio=episode_handover_ratio,

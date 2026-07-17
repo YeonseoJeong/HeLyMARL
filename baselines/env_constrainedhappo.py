@@ -56,19 +56,16 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         self.C_H_u_history = []
 
         # Episode-level constraint statistics
-        self.episode_on_hist = {
-            bs.bs_id: []
-            for bs in self.base_stations
-        }
+        self.episode_on_hist = {bs.bs_id: [] for bs in self.base_stations}
+        self.episode_ho_hist = {u.ue_id: [] for u in self.users}
 
-        self.episode_ho_hist = {
-            u.ue_id: []
-            for u in self.users
-        }
+        self.episode_on_count = {bs.bs_id: 0 for bs in self.base_stations}
+        self.episode_ho_count = {u.ue_id: 0 for u in self.users}
 
+        self.pf_avg_init = 1.0
         # PF cumulative average rate, Rbar_u(t-1)
         self.avg_rate_u = {
-            u.ue_id: self.rate_eps
+            u.ue_id: self.pf_avg_init
             for u in self.users
         }
         self.avg_rate_count_u = {
@@ -91,8 +88,18 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
             for u in self.users
         }
 
+        self.episode_on_count = {
+            bs.bs_id: 0
+            for bs in self.base_stations
+        }
+
+        self.episode_ho_count = {
+            u.ue_id: 0  
+            for u in self.users
+        }
+
         self.avg_rate_u = {
-            u.ue_id: self.rate_eps
+            u.ue_id: self.pf_avg_init
             for u in self.users
         }
         self.avg_rate_count_u = {
@@ -121,21 +128,13 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         return float(rate)
     
     def _remaining_handover_ratio(self, ue_id: int) -> float:
-        hist = self.episode_ho_hist[ue_id]
-        if len(hist) == 0:
-            return 1.0
-        used_ho = float(np.sum(hist))
-        max_ho = max(1.0, self.kappa * self.episode_length)
-
+        used_ho = float(self.episode_ho_count[ue_id])
+        max_ho = max(1.0, self.kappa * max(self.episode_length-1,1),)
         return float(np.clip((max_ho - used_ho) / max_ho, 0.0, 1.0))
 
     def _remaining_energy_ratio(self, bs_id: int) -> float:
-        hist = self.episode_on_hist[bs_id]
-        if len(hist) == 0:
-            return 1.0
-        used_on = float(np.sum(hist))
+        used_on = float(self.episode_on_count[bs_id])
         max_on = max(1.0, self.power_budget_ratio * self.episode_length)
-
         return float(np.clip((max_on - used_on) / max_on, 0.0, 1.0))
     
     def _get_local_observation_by_index(self, ui: int) -> np.ndarray:
@@ -268,10 +267,13 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
             bs_id = bs.bs_id
             y_b = float(power_consumed[bs_id] > 0.0)
             self.episode_on_hist[bs_id].append(y_b)
+            self.episode_on_count[bs_id] += y_b
 
         for u in self.users:
             ue_id = u.ue_id
-            self.episode_ho_hist[ue_id].append(float(handover_u[ue_id]))
+            h_u = float(handover_u[ue_id])
+            self.episode_ho_hist[ue_id].append(h_u)
+            self.episode_ho_count[ue_id] += h_u
 
         # 2. old dual variables 기록
         old_mu_E_b = self.mu_E_b.copy()
@@ -399,6 +401,16 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
 
         self.episode_ho_hist = {
             u.ue_id: []
+            for u in self.users
+        }
+
+        self.episode_on_count = {
+            bs.bs_id: 0.0
+            for bs in self.base_stations
+        }
+
+        self.episode_ho_count = {
+            u.ue_id: 0.0
             for u in self.users
         }
             

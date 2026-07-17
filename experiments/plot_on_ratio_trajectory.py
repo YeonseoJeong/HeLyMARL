@@ -25,7 +25,7 @@ NPZ_FILES = {
     ),
     "HeLyMARL": (
         "results/results_kappa/"
-        "HeLyMARL_eval_hard_kappa_0.03.npz"
+        "HeLyMARL_eval_hard_lambda_15.0.npz"
     ),
 }
 

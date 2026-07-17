@@ -1,8 +1,25 @@
 import os
-import glob
-import re
+import matplotlib
+import matplotlib.font_manager as fm
+fm._load_fontmanager(try_read_cache=False)
+
 import numpy as np
 import matplotlib.pyplot as plt
+
+plt.rcParams.update({
+    "font.family": "Times New Roman",
+    "mathtext.fontset": "stix",
+    "font.size": 22,
+    # "font.weight": "bold",
+    "axes.titlesize": 22,
+    "axes.labelsize": 20,
+    # "axes.labelweight": "bold",
+    "xtick.labelsize": 20,
+    "ytick.labelsize": 20,
+    "legend.fontsize": 20,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
 
 
 def moving_average(x, window=1000):
@@ -20,166 +37,269 @@ def moving_average(x, window=1000):
     kernel = np.ones(window, dtype=np.float32) / window
     return np.convolve(x, kernel, mode="valid")
 
+# def moving_average(x, window=1000):
+#     """
+#     처음 window-1 step은 현재까지의 누적 평균,
+#     이후에는 trailing moving average를 계산한다.
+#     출력 길이는 입력 길이와 동일하다.
+#     """
+#     x = np.asarray(x, dtype=np.float32).reshape(-1)
 
-def extract_kappa_from_filename(path):
-    """
-    Example:
-    LyMARL_train_rewards_kappa_0.01.npz
-    LyMARL_eval_hard_kappa_0.01.npz
-    """
-    fname = os.path.basename(path)
+#     if x.size == 0:
+#         return x
 
-    m = re.search(r"kappa_([0-9]+(?:\.[0-9]+)?)(?=\.npz|_|$)", fname)
-    if m is None:
-        return None
+#     if window <= 1:
+#         return x.copy()
 
-    # 혹시 .npz의 마지막 점까지 잡히는 경우 방지
-    kappa_str = m.group(1).replace(".npz", "")
-    return float(kappa_str)
+#     window = min(window, len(x))
 
+#     cumsum = np.cumsum(
+#         np.insert(x.astype(np.float64), 0, 0.0)
+#     )
 
-def load_npz_by_kappa(result_dir, lambda_E=15.0):
-    train_pattern = os.path.join(
-        result_dir,
-        f"LyMARL_train_rewards_kappa_*.npz"
-    )
+#     result = np.empty(len(x), dtype=np.float32)
 
-    eval_pattern = os.path.join(
-        result_dir,
-        f"LyMARL_eval_hard_kappa_*.npz"
-    )
+#     for t in range(len(x)):
+#         start = max(0, t - window + 1)
+#         count = t - start + 1
 
-    train_files = glob.glob(train_pattern)
-    eval_files = glob.glob(eval_pattern)
+#         result[t] = (
+#             cumsum[t + 1] - cumsum[start]
+#         ) / count
 
-    train_dict = {}
-    eval_dict = {}
+#     return result
 
-    for path in train_files:
-        kappa = extract_kappa_from_filename(path)
-        if kappa is not None:
-            train_dict[kappa] = path
-
-    for path in eval_files:
-        kappa = extract_kappa_from_filename(path)
-        if kappa is not None:
-            eval_dict[kappa] = path
-
-    kappas = sorted(set(train_dict.keys()) | set(eval_dict.keys()))
-
-    return kappas, train_dict, eval_dict
-
-
-def plot_train_eval_handover_by_kappa(
-    result_dir="results_kappa",
-    lambda_E=15.0,
+def episodic_moving_average(
+    x,
+    episode_length=10000,
     window=1000,
-    save_dir=None,
 ):
-    if save_dir is None:
-        save_dir = os.path.join(result_dir, "plots")
+    x = np.asarray(x, dtype=np.float32).reshape(-1)
 
-    os.makedirs(save_dir, exist_ok=True)
+    x_parts = []
+    y_parts = []
 
-    kappas, train_dict, eval_dict = load_npz_by_kappa(
-        result_dir=result_dir,
-        lambda_E=lambda_E
-    )
+    for episode_start in range(0, len(x), episode_length):
+        episode_end = min(
+            episode_start + episode_length,
+            len(x),
+        )
 
-    if len(kappas) == 0:
-        print("[Warning] No kappa files found.")
-        return
+        episode_data = x[episode_start:episode_end]
 
-    for kappa in kappas:
-        plt.figure(figsize=(8, 5))
-
-        budget = kappa
-        plotted = False
-
-        # --------------------------------------------------
-        # Train curve
-        # --------------------------------------------------
-        if kappa in train_dict:
-            train_data = np.load(train_dict[kappa], allow_pickle=True)
-
-            train_ho = train_data["handover_ratio"].astype(np.float32)
-            train_ho_ma = moving_average(train_ho, window=window)
-
-            if "handover_budget_ratio" in train_data:
-                budget = float(train_data["handover_budget_ratio"][0])
-
-            x_train = np.arange(len(train_ho_ma))
-            plt.plot(
-                x_train,
-                train_ho_ma,
-                label=f"Train (MA{window})",
-                linewidth=2.0
-            )
-            plotted = True
-
-        else:
-            print(f"[Warning] Missing train file for kappa={kappa}")
-
-        # --------------------------------------------------
-        # Eval curve
-        # --------------------------------------------------
-        if kappa in eval_dict:
-            eval_data = np.load(eval_dict[kappa], allow_pickle=True)
-
-            eval_ho = eval_data["handover_ratio"].astype(np.float32)
-            eval_ho_ma = moving_average(eval_ho, window=window)
-
-            if "handover_budget_ratio" in eval_data:
-                budget = float(eval_data["handover_budget_ratio"][0])
-
-            x_eval = np.arange(len(eval_ho_ma))
-            plt.plot(
-                x_eval,
-                eval_ho_ma,
-                label=f"Eval Hard (MA{window})",
-                linewidth=2.0
-            )
-            plotted = True
-
-        else:
-            print(f"[Warning] Missing eval file for kappa={kappa}")
-
-        if not plotted:
-            plt.close()
+        if len(episode_data) == 0:
             continue
 
-        # --------------------------------------------------
-        # Kappa budget line
-        # --------------------------------------------------
-        plt.axhline(
+        episode_ma = moving_average(
+            episode_data,
+            window=window,
+        )
+
+        episode_x = np.arange(
+            episode_start,
+            episode_end,
+        )
+
+        x_parts.append(episode_x)
+        y_parts.append(episode_ma)
+
+        # 에피소드 사이의 선을 끊기 위한 NaN
+        x_parts.append(np.array([np.nan]))
+        y_parts.append(np.array([np.nan]))
+
+    if len(x_parts) == 0:
+        return np.array([]), np.array([])
+
+    return (
+        np.concatenate(x_parts),
+        np.concatenate(y_parts),
+    )
+
+def plot_train_curve(
+    result_dir="results/results_kappa",
+    save_dir="results/results_kappa/plots",
+    kappas=(0.01, 0.02, 0.03),
+    episode_length=10000,
+    window=1000,
+):
+    os.makedirs(save_dir, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(7.5, 6.0))
+
+    colors = ["C0", "C2", "C3"]
+    found_train = False
+
+    for i, kappa in enumerate(kappas):
+        train_path = os.path.join(
+            result_dir,
+            f"HeLyMARL_train_rewards_kappa_{kappa}.npz"
+        )
+
+        if not os.path.exists(train_path):
+            print(f"[Warning] Train file not found: {train_path}")
+            continue
+
+        data = np.load(train_path, allow_pickle=True)
+
+        if "handover_ratio" not in data:
+            print(f"[Warning] 'handover_ratio' not found in {train_path}")
+            continue
+
+        ho_ratio = np.asanyarray(data["handover_ratio"], dtype=np.float32).reshape(-1)
+        ho_ma = moving_average(ho_ratio, window=window)
+
+        x_step = np.arange(window -1, window - 1 + len(ho_ma))
+        x_episode = (x_step+1) / episode_length
+
+        if "handover_budget_ratio" in data:
+            budget = float(data["handover_budget_ratio"][0])
+        else:
+            budget = float(kappa)
+
+        # x = np.arange(window - 1, window - 1 + len(ho_ma))
+        color = colors[i % len(colors)]
+
+        ax.plot(
+            x_episode,
+            ho_ma,
+            linewidth=2.0,
+            color=color,
+            label=f"Train $\\kappa$ = {budget:.2f}"
+        )
+
+        ax.axhline(
             y=budget,
             linestyle="--",
-            linewidth=1.5,
-            label=fr"Budget $\kappa$={budget}"
+            linewidth=1.3,
+            color=color,
+            alpha=0.9
         )
 
-        plt.xlabel("Step")
-        plt.ylabel("Handover Ratio")
-        plt.title(fr"Training/Evaluation Handover Ratio ($\kappa$={kappa}, $\lambda_E$={lambda_E})")
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        plt.tight_layout()
+        found_train = True
 
-        save_path = os.path.join(
-            save_dir,
-            f"handover_ratio_train_eval_lambda_{lambda_E}_kappa_{kappa}.png"
+    n_episodes = len(ho_ratio) / episode_length
+
+    ax.set_xlabel("Training Episode")
+    ax.set_ylabel(f"Handover Ratio (MA{window})")
+    if found_train:
+        ax.set_xlim(0, n_episodes)
+        ax.set_xticks(np.arange(0, int(np.floor(n_episodes)) + 1, 1))
+        ax.legend()
+    
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    save_path = os.path.join(
+        save_dir,
+        "train_handover_curve_kappa.png"
+    )
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", format="png")
+    plt.close()
+
+    print(f"✅ Saved: {save_path}")
+
+
+def plot_eval_bar(
+    result_dir="results/results_kappa",
+    save_dir="results/results_kappa/plots",
+    kappas=(0.01, 0.02, 0.03),
+):
+    os.makedirs(save_dir, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(7.5, 6.0))
+
+    colors = ["C0", "C2", "C3"]
+
+    eval_means = []
+    eval_labels = []
+
+    found_eval = False
+
+    for i, kappa in enumerate(kappas):
+        eval_path = os.path.join(
+            result_dir,
+            f"HeLyMARL_eval_hard_kappa_{kappa}.npz"
         )
 
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
+        if not os.path.exists(eval_path):
+            print(f"[Warning] Eval file not found: {eval_path}")
+            continue
 
-        print(f"✅ Saved: {save_path}")
+        data = np.load(eval_path, allow_pickle=True)
+
+        if "handover_ratio" not in data:
+            print(f"[Warning] 'handover_ratio' not found in {eval_path}")
+            continue
+
+        ho_ratio = data["handover_ratio"].astype(np.float32)
+
+        if "handover_budget_ratio" in data:
+            budget = float(data["handover_budget_ratio"][0])
+        else:
+            budget = float(kappa)
+
+        mean_val = float(np.mean(ho_ratio))
+
+        eval_means.append(mean_val)
+        eval_labels.append(f"$\\kappa$ = {budget:.2f}")
+
+        found_eval = True
+
+    if found_eval:
+        x_bar = np.arange(len(eval_means))
+        bar_colors = [colors[i % len(colors)] for i in range(len(eval_means))]
+
+        ax.bar(
+            x_bar,
+            eval_means,
+            color=bar_colors,
+            alpha=0.85,
+            width=0.6
+        )
+
+        ax.set_xticks(x_bar)
+        ax.set_xticklabels(eval_labels)
+        ax.set_ylabel("Average Handover Ratio")
+        ax.set_ylim(0, 0.03)
+        ax.grid(True, axis="y", alpha=0.3)
+
+        for i, val in enumerate(eval_means):
+            ax.text(
+                i,
+                val + 0.001,
+                f"{val:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=17,
+                fontweight="bold"
+            )
+
+    plt.tight_layout()
+
+    save_path = os.path.join(
+        save_dir,
+        "eval_handover_bar_kappa.png"
+    )
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", format="png")
+    plt.close()
+
+    print(f"✅ Saved: {save_path}")
 
 
 if __name__ == "__main__":
-    plot_train_eval_handover_by_kappa(
-        result_dir="results_kappa",
-        lambda_E=15.0,
-        window=1000,
-        save_dir="results_kappa/plots"
+    kappas = (0.01, 0.02, 0.03)
+
+    plot_train_curve(
+        result_dir="results/results_kappa",
+        save_dir="results/results_kappa/plots",
+        kappas=kappas,
+        episode_length=10000,
+        window=2000,
+    )
+
+    plot_eval_bar(
+        result_dir="results/results_kappa",
+        save_dir="results/results_kappa/plots",
+        kappas=kappas,
     )
