@@ -2,6 +2,8 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+from matplotlib.ticker import FuncFormatter
+
 
 # ============================================================
 # Plot settings
@@ -18,6 +20,13 @@ plt.rcParams.update({
     "lines.linewidth": 2.2,
 })
 
+ALGORITHM_COLORS = {
+    "DDPP": "#1f77b4",
+    "MaxSNR": "#ff7f0e",
+    "PF-HAPPO": "#2ca02c",
+    "Jensen-HAPPO": "#d62728",
+    "HeLyMARL": "#9467bd",
+}
 
 def load_policy_improvement_objective(npz_path):
     """
@@ -72,8 +81,10 @@ def load_policy_improvement_objective(npz_path):
             dtype=np.float64,
         ).reshape(-1)
 
-
+        # ----------------------------------------------------
         # Gbps-based objective -> bps-based objective
+        # 필요한 경우 아래 주석 해제
+        # ----------------------------------------------------
         # objective_mean = (
         #     objective_mean
         #     + 20 * np.log(1e9)
@@ -151,21 +162,40 @@ def load_policy_improvement_objective(npz_path):
     )
 
 
+def format_k_tick(value, position):
+    """
+    x축 값이 이미 1000으로 나누어진 경우,
+    0, 20k, 40k, ... 형식으로 표시한다.
+    """
+    if np.isclose(value, 0.0):
+        return "0"
+
+    if np.isclose(value, round(value)):
+        return f"{int(round(value))}k"
+
+    return f"{value:g}k"
+
+
 def plot_policy_improvement_objective(
     npz_paths,
     save_path,
     show_std=True,
     steps_per_episode=10000,
     x_scale=1000.0,
+    marker_every=2,
+    show_episode_boundaries=True,
 ):
     """
+    checkpoint별 evaluation objective를
+    전체 training environment step에 따라 표시한다.
+
     Parameters
     ----------
     npz_paths : dict
         {
-            "PF-HAPPO": "path/to/policy_improvement.npz",
-            "Jensen-HAPPO": "path/to/policy_improvement.npz",
-            "HeLyMARL": "path/to/policy_improvement.npz",
+            "PF-HAPPO": "path/to/file.npz",
+            "Jensen-HAPPO": "path/to/file.npz",
+            "HeLyMARL": "path/to/file.npz",
         }
 
     save_path : str
@@ -175,24 +205,33 @@ def plot_policy_improvement_objective(
         evaluation seed 간 objective std 음영 표시 여부
 
     steps_per_episode : int
-        episode 경계 표시용
+        episode 경계 표시용 step 수
 
     x_scale : float
-        x축 scaling.
-        1000이면 Training Steps (x 10^3)로 표시
+        x축 scaling 값.
+        1000이면 10000 step이 x축에서 10으로 표시됨.
+
+    marker_every : int
+        몇 개 checkpoint마다 marker를 표시할지 결정
+
+    show_episode_boundaries : bool
+        episode 경계 수직선 표시 여부
     """
-    os.makedirs(
+    output_dir = (
         os.path.dirname(save_path)
         if os.path.dirname(save_path)
-        else ".",
+        else "."
+    )
+
+    os.makedirs(
+        output_dir,
         exist_ok=True,
     )
 
-    fig, ax = plt.subplots(
-        figsize=(7.8, 5.3)
-    )
-
-    plotted = False
+    # --------------------------------------------------------
+    # 데이터 먼저 모두 로드
+    # --------------------------------------------------------
+    loaded_results = {}
     all_train_steps = []
 
     for algorithm, npz_path in npz_paths.items():
@@ -215,15 +254,113 @@ def plot_policy_improvement_objective(
             )
             continue
 
-        x = train_steps / x_scale
+        x = (
+            train_steps.astype(np.float64)
+            / x_scale
+        )
+
+        loaded_results[algorithm] = {
+            "train_steps": train_steps,
+            "objective_mean": objective_mean,
+            "objective_std": objective_std,
+            "episodes": episodes,
+            "updates": updates,
+            "x": x,
+        }
+
+        all_train_steps.extend(
+            train_steps.tolist()
+        )
+
+    if not loaded_results:
+        raise RuntimeError(
+            "그릴 수 있는 policy improvement objective 데이터가 없습니다."
+        )
+
+    max_train_step = int(
+        np.max(all_train_steps)
+    )
+
+    max_x = (
+        max_train_step
+        / x_scale
+    )
+
+    # --------------------------------------------------------
+    # Figure 생성
+    # --------------------------------------------------------
+    fig, ax = plt.subplots(
+        figsize=(7.8, 5.3)
+    )
+
+    line_styles = {
+        "PF-HAPPO": "-.",
+        "Jensen-HAPPO": "--",
+        "HeLyMARL": "-",
+    }
+
+    markers = {
+        "PF-HAPPO": "^",
+        "Jensen-HAPPO": "D",
+        "HeLyMARL": "o",
+    }
+
+    for algorithm, result in loaded_results.items():
+        train_steps = result["train_steps"]
+        objective_mean = result["objective_mean"]
+        objective_std = result["objective_std"]
+        episodes = result["episodes"]
+        updates = result["updates"]
+        x = result["x"]
+
+        is_helymarl = (
+            algorithm == "HeLyMARL"
+        )
+
+        linewidth = (
+            2.8
+            if is_helymarl
+            else 2.0
+        )
+
+        markersize = (
+            5.0
+            if is_helymarl
+            else 4.2
+        )
+
+        zorder = (
+            4
+            if is_helymarl
+            else 3
+        )
+
+        linestyle = line_styles.get(
+            algorithm,
+            "-",
+        )
+
+        marker = markers.get(
+            algorithm,
+            "o",
+        )
+
+        line_color = ALGORITHM_COLORS.get(
+            algorithm,
+            "black",
+        )
 
         ax.plot(
             x,
             objective_mean,
-            marker="o",
-            markersize=4.5,
-            linewidth=2.2,
+            color=line_color,
+            linestyle=linestyle,
+            marker=marker,
+            markevery=marker_every,
+            markersize=markersize,
+            linewidth=linewidth,
             label=algorithm,
+            zorder=zorder,
         )
 
         if (
@@ -231,16 +368,29 @@ def plot_policy_improvement_objective(
             and len(objective_std) > 0
             and np.any(objective_std > 0)
         ):
-            lower = objective_mean - objective_std
-            upper = objective_mean + objective_std
+            lower = (
+                objective_mean
+                - objective_std
+            )
+
+            upper = (
+                objective_mean
+                + objective_std
+            )
 
             ax.fill_between(
                 x,
                 lower,
                 upper,
-                alpha=0.18,
+                color=line_color,
+                alpha=0.10,
+                linewidth=0,
+                zorder=1,
             )
 
+        # ----------------------------------------------------
+        # 저장된 수치 출력
+        # ----------------------------------------------------
         print(f"\n{algorithm}")
         print("=" * 85)
 
@@ -259,68 +409,73 @@ def plot_policy_improvement_objective(
                 f"Std = {std:.6f}"
             )
 
-        all_train_steps.extend(
-            train_steps.tolist()
-        )
-
-        plotted = True
-
-    if not plotted:
-        plt.close(fig)
-        raise RuntimeError(
-            "그릴 수 있는 policy improvement objective 데이터가 없습니다."
-        )
-
-    ax.set_xlabel(
-        r"Training Environment Steps ($\times 10^3$)"
-    )
-    ax.set_ylabel(
-        "Evaluation Objective"
-    )
-
     # --------------------------------------------------------
     # Episode boundary 표시
     # --------------------------------------------------------
-    max_train_step = int(np.max(all_train_steps))
-
-    episode_boundaries = np.arange(
-        steps_per_episode,
-        max_train_step + 1,
-        steps_per_episode,
-    )
-
-    for boundary in episode_boundaries:
-        ax.axvline(
-            boundary / x_scale,
-            color="gray",
-            linestyle=":",
-            linewidth=0.9,
-            alpha=0.45,
-            zorder=0,
+    if show_episode_boundaries:
+        episode_boundaries = np.arange(
+            steps_per_episode,
+            max_train_step + 1,
+            steps_per_episode,
         )
 
-    # 학습 전 policy가 step 0이므로 x축도 0부터 시작
+        for boundary in episode_boundaries:
+            ax.axvline(
+                boundary / x_scale,
+                color="gray",
+                linestyle=":",
+                linewidth=0.8,
+                alpha=0.30,
+                zorder=0,
+            )
+
+    # --------------------------------------------------------
+    # 축 설정
+    # --------------------------------------------------------
     ax.set_xlim(
         left=0.0,
-        right=max_train_step / x_scale,
+        right=max_x,
+    )
+
+    ax.set_xlabel(
+        "Training Environment Steps"
+    )
+
+    ax.set_ylabel(
+        r"Evaluation Objective Eq. (7)"
+    )
+
+    ax.xaxis.set_major_formatter(
+        FuncFormatter(format_k_tick)
     )
 
     ax.grid(
         True,
-        alpha=0.3,
+        alpha=0.25,
         linestyle="--",
+        linewidth=0.8,
     )
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
+    ax.tick_params(
+        direction="out",
+        length=4.5,
+        width=1.1,
+    )
+
     ax.legend(
         loc="lower right",
         frameon=False,
+        handlelength=2.8,
     )
 
     fig.tight_layout()
 
+    # --------------------------------------------------------
+    # 저장
+    # --------------------------------------------------------
     fig.savefig(
         save_path,
         dpi=300,
@@ -330,8 +485,8 @@ def plot_policy_improvement_objective(
     plt.close(fig)
 
     print(
-        f"\n✅ Saved policy improvement plot: "
-        f"{save_path}"
+        f"\n✅ Saved policy improvement plot:\n"
+        f"   PNG: {save_path}"
     )
 
 
@@ -358,7 +513,7 @@ if __name__ == "__main__":
 
     SAVE_PATH = (
         "eval_compare_plots/"
-        "evaluation_objective_vs_training_episode.png"
+        "evaluation_objective_learning_curve.png"
     )
 
     plot_policy_improvement_objective(
@@ -367,4 +522,10 @@ if __name__ == "__main__":
         show_std=True,
         steps_per_episode=10000,
         x_scale=1000.0,
+
+        # 2개 checkpoint마다 marker 표시
+        marker_every=2,
+
+        # 10k마다 episode 경계선 표시
+        show_episode_boundaries=True,
     )

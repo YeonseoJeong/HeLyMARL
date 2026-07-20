@@ -15,7 +15,7 @@ from collections import defaultdict
 
 from env.basestation import BaseStation, SmallCellBaseStation
 from env.user_equipment import UserEquipment
-from env.core import generate_triangle_coverage, generate_five_bs_coverage
+from env.core import generate_triangle_coverage
 
 ################################################
 ## BASELINE DDPP ALGORITHM IMPLEMENTATION
@@ -45,6 +45,8 @@ class DDPPAlgorithm:
 
         self.users = users
         self.base_stations = [bs for bs in base_stations if bs.bs_id != 0]
+        self.user_map = {ue.ue_id: ue for ue in self.users}
+        self.bs_map = {bs.bs_id: bs for bs in self.base_stations}
         self.V = V
         self.power_budget_ratio = power_budget_ratio
         self.max_slots = max_slots
@@ -80,10 +82,10 @@ class DDPPAlgorithm:
         }
 
         self.Q_u = {ue.ue_id: 0.1 for ue in users}
-        self.Z_b = {bs.bs_id: 0.01 for bs in self.base_stations}
+        self.Z_b = {bs.bs_id: 0.0 for bs in self.base_stations}
+        self.G_u = {ue.ue_id: 0.0 for ue in users}
         self.gamma_max = {ue.ue_id: 5.0 for ue in users}
 
-        self.G_u = {ue.ue_id: 0.0 for ue in users}
         self.kappa = kappa
 
         self.m_u = {ue.ue_id: None for ue in users}
@@ -188,46 +190,116 @@ class DDPPAlgorithm:
     # ==========================================
     # PHY Layer
     # ==========================================
-    def calculate_achievable_rate(self, user_id: int, bs_id: int, interferer_status: dict = None) -> float:
-        """ Returns: rate [Gbps] """
-        user = next(u for u in self.users if u.ue_id == user_id)
-        bs = next(b for b in self.base_stations if b.bs_id == bs_id)
+    def calculate_achievable_rate(self, user_id: int, bs_id: int) -> float:
+        """
+        Decision용 예상 rate [Gbps].
 
+        현재 슬롯의 association/scheduling 결정을 내리기 전이므로,
+        다른 BS의 이전 슬롯 송신전력 ``prev_power``를 이용하여
+        inter-cell interference를 추정한다.
+        """
+        user = self.user_map[user_id]
+        bs = self.bs_map[bs_id]
+
+        if not bs.can_serve(user.position):
+            return 0.0
+
+        # Desired link
         dist = max(1.0, bs.distance_to(user.position))
         rx_dbm = bs.receive_power(dist)
 
-        # small-scale fading gain (linear) 
         gain = self.channel_gains.get(user_id, {}).get(bs_id, 1.0)
-        rx_dbm += 10 * np.log10(gain + 1e-12)
+        rx_dbm += 10.0 * np.log10(gain + 1e-12)
+        rx_watts = 10.0 ** (rx_dbm / 10.0) / 1000.0
 
-        # dBm -> W
-        rx_watts = 10 ** (rx_dbm / 10) / 1000
-
-        # interference
+        # Previous-slot interference
         interference = 0.0
         for other_bs in self.base_stations:
-            if other_bs.bs_id == bs_id:
+            other_bs_id = other_bs.bs_id
+
+            if other_bs_id == bs_id:
                 continue
 
-            # 간섭원 선택 기준
-            if interferer_status is None:
-                # 이전 슬롯 ON만 간섭원
-                is_on = (self.prev_power.get(other_bs.bs_id, 0.0) > 0.0)
-            else:
-                # 현재 슬롯 ON만 간섭원
-                is_on = (interferer_status.get(other_bs.bs_id, 0) == 1)
-
-            if not is_on:
+            prev_p = float(self.prev_power.get(other_bs_id, 0.0))
+            if prev_p <= 0.0:
                 continue
 
             other_dist = max(1.0, other_bs.distance_to(user.position))
             other_rx_dbm = other_bs.receive_power(other_dist)
-            # interference 쪽에는 channel gain 안 붙임
-            interference += 10 ** (other_rx_dbm / 10) / 1000
+
+            # UE u가 interference BS b'로부터 겪는 fading gain
+            other_gain = self.channel_gains.get(user_id, {}).get(
+                other_bs_id,
+                1.0,
+            )
+            other_rx_dbm += 10.0 * np.log10(other_gain + 1e-12)
+            other_rx_watts = 10.0 ** (other_rx_dbm / 10.0) / 1000.0
+
+            # HeLyMARL과 동일하게 실제 송신전력 비율을 반영
+            denom = max(float(self.P_max.get(other_bs_id, 1e-12)), 1e-12)
+            power_scale = prev_p / denom
+            interference += other_rx_watts * power_scale
 
         sinr = rx_watts / (self.noise_watts + interference)
         rate_bps = bs.bandwidth * np.log2(1.0 + sinr)
-        return max(0.0, rate_bps / 1e9)
+        return max(0.0, float(rate_bps / 1e9))
+
+    def calculate_scheduled_rate(
+        self,
+        user_id: int,
+        serving_bs_id: int,
+        tx_power_map: dict,
+    ) -> float:
+        """
+        Scheduling/energy-mask 적용 후의 실제 service rate [Gbps].
+
+        현재 슬롯에서 최종적으로 결정된 ``tx_power_map``을 이용하여
+        inter-cell interference를 계산한다.
+        """
+        user = self.user_map[user_id]
+        bs = self.bs_map[serving_bs_id]
+
+        if not bs.can_serve(user.position):
+            return 0.0
+
+        # Desired link
+        dist = max(1.0, bs.distance_to(user.position))
+        rx_dbm = bs.receive_power(dist)
+
+        gain = self.channel_gains.get(user_id, {}).get(serving_bs_id, 1.0)
+        rx_dbm += 10.0 * np.log10(gain + 1e-12)
+        rx_watts = 10.0 ** (rx_dbm / 10.0) / 1000.0
+
+        # Current-slot interference
+        interference = 0.0
+        for other_bs in self.base_stations:
+            other_bs_id = other_bs.bs_id
+
+            if other_bs_id == serving_bs_id:
+                continue
+
+            p_now = float(tx_power_map.get(other_bs_id, 0.0))
+            if p_now <= 0.0:
+                continue
+
+            other_dist = max(1.0, other_bs.distance_to(user.position))
+            other_rx_dbm = other_bs.receive_power(other_dist)
+
+            # Interference link에도 동일한 current channel gain 적용
+            other_gain = self.channel_gains.get(user_id, {}).get(
+                other_bs_id,
+                1.0,
+            )
+            other_rx_dbm += 10.0 * np.log10(other_gain + 1e-12)
+            other_rx_watts = 10.0 ** (other_rx_dbm / 10.0) / 1000.0
+
+            denom = max(float(self.P_max.get(other_bs_id, 1e-12)), 1e-12)
+            power_scale = p_now / denom
+            interference += other_rx_watts * power_scale
+
+        sinr = rx_watts / (self.noise_watts + interference)
+        rate_bps = bs.bandwidth * np.log2(1.0 + sinr)
+        return max(0.0, float(rate_bps / 1e9))
 
     # ==========================================
     # DPP Core
@@ -270,7 +342,7 @@ class DDPPAlgorithm:
                     best_w = w
                     best_bs = bs_id
 
-            associations[ue_id] = best_bs
+            associations[ue_id] = best_bs if best_w > 0.0 else None
 
         return associations
     
@@ -321,10 +393,19 @@ class DDPPAlgorithm:
         """Queue updates + returns actual served rates R(SINR)"""
         actual_rates = {u.ue_id: 0.0 for u in self.users}
 
+        # HeLyMARL과 동일하게 현재 슬롯 최종 송신전력 지도를 생성
+        tx_power_map = {
+            bs_id: float(bs_status.get(bs_id, 0)) * self.P_max[bs_id]
+            for bs_id in self.P_max
+        }
+
         for bs_id, ue_id in scheduled_users.items():
-            if ue_id is not None and bs_status[bs_id] == 1:
-                # actual rate는 "현재 슬롯 ON(bs_status)"을 간섭원으로 사용
-                actual_rate = self.calculate_achievable_rate(ue_id, bs_id, interferer_status=bs_status)
+            if ue_id is not None and bs_status.get(bs_id, 0) == 1:
+                actual_rate = self.calculate_scheduled_rate(
+                    user_id=ue_id,
+                    serving_bs_id=bs_id,
+                    tx_power_map=tx_power_map,
+                )
                 actual_rates[ue_id] = actual_rate
                 self.user_rate_history[ue_id].append(actual_rate)
 
@@ -944,17 +1025,8 @@ if __name__ == "__main__":
         print(f"{'='*80}\n")
 
         sbs_positions = generate_triangle_coverage(area_size, 35)
-        # sbs_positions = generate_five_bs_coverage(area_size, 35)
         sbs_list = [SmallCellBaseStation(i + 1, pos, 10, 35) for i, pos in enumerate(sbs_positions)]
-        # boundary_user_positions = sample_users_near_bs_boundaries(
-        #     sbs_positions=sbs_positions,
-        #     num_users=num_users,
-        #     area_size=area_size,
-        #     noise_std=5.0,
-        #     min_pos=10,
-        #     max_pos=90,
-        # )
-        # users = [UserEquipment(i + 1, boundary_user_positions[i]) for i in range(num_users)]
+
         users = [
             UserEquipment(i + 1, (np.random.uniform(10, 90), np.random.uniform(10, 90)))
             for i in range(num_users)
@@ -971,5 +1043,4 @@ if __name__ == "__main__":
             kappa=0.03
         )
         dpp.run_simulation()
-        # dpp.plot_results()
         dpp.save_results_npz(f"results/results_compare/DDPP_eval_lambda_{lambda_E}.npz", tag=f"DDPP_{lambda_E}")

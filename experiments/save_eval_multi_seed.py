@@ -39,6 +39,8 @@ KAPPA = 0.03
 HELYMARL_V = 5.0
 HELYMARL_LAMBDA_E = 0.0
 
+OVERWRITE_EXISTING = False
+
 SAVE_ROOT = "results/results_multi_seed"
 os.makedirs(SAVE_ROOT, exist_ok=True)
 
@@ -514,6 +516,235 @@ def load_bs_on_matrix(npz_path):
             f"No usable BS ON/OFF data in {npz_path}\n"
             f"Available keys: {data.files}"
         )
+    
+# ============================================================
+# 10-1. Seed별 evaluation 결과에서
+#       cumulative handover ratio trajectory 추출
+# ============================================================
+def load_handover_trajectory(npz_path):
+    """
+    반환:
+        handover_trajectory: [T]
+
+    우선순위:
+        1. handover_ratio_trajectory
+           이미 cumulative ratio인 경우
+
+        2. handover_ratio
+           저장된 값이 [T] trajectory인 경우
+
+        3. handover_ratio_step
+           매 slot의 handover 비율인 경우 cumulative로 변환
+
+        4. handover_indicator_mat
+           [T, U] 또는 [U, T]에서 cumulative로 변환
+    """
+    if not os.path.exists(npz_path):
+        raise FileNotFoundError(
+            f"Evaluation result not found: {npz_path}"
+        )
+
+    with np.load(
+        npz_path,
+        allow_pickle=True,
+    ) as data:
+
+        # ----------------------------------------------------
+        # Case 1: 이미 cumulative trajectory
+        # ----------------------------------------------------
+        cumulative_keys = [
+            "handover_ratio_trajectory",
+            "cumulative_handover_ratio",
+            "handover_ratio_running",
+        ]
+
+        for key in cumulative_keys:
+            if key not in data.files:
+                continue
+
+            trajectory = np.asarray(
+                data[key],
+                dtype=float,
+            ).squeeze()
+
+            if trajectory.ndim != 1:
+                raise ValueError(
+                    f"'{key}' must be 1-D, "
+                    f"but got {trajectory.shape}"
+                )
+
+            return trajectory.astype(
+                np.float32
+            )
+
+        # ----------------------------------------------------
+        # Case 2: 기존 handover_ratio
+        #
+        # 저장된 handover_ratio가 slot별 사용자 평균 HO 값이라면
+        # cumulative average trajectory로 변환한다.
+        # ----------------------------------------------------
+        if "handover_ratio" in data.files:
+            handover_ratio_step = np.asarray(
+                data["handover_ratio"],
+                dtype=float,
+            ).squeeze()
+
+            if (
+                handover_ratio_step.ndim == 1
+                and handover_ratio_step.size > 1
+            ):
+                handover_ratio_step = np.nan_to_num(
+                    handover_ratio_step,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+
+                original_length = len(
+                    handover_ratio_step
+                )
+
+                # 모든 알고리즘의 evaluation horizon을 10K로 통일
+                if original_length < STEPS_PER_EPISODE:
+                    handover_ratio_step = np.pad(
+                        handover_ratio_step,
+                        (
+                            0,
+                            STEPS_PER_EPISODE
+                            - original_length,
+                        ),
+                        mode="constant",
+                        constant_values=0.0,
+                    )
+
+                handover_ratio_step = (
+                    handover_ratio_step[
+                        :STEPS_PER_EPISODE
+                    ]
+                )
+
+                denominator = np.arange(
+                    1,
+                    len(handover_ratio_step) + 1,
+                    dtype=float,
+                )
+
+                handover_trajectory = (
+                    np.cumsum(handover_ratio_step)
+                    / denominator
+                )
+
+                print(
+                    f"[HO LOAD] {npz_path}: "
+                    f"raw length={original_length}, "
+                    f"final length={len(handover_trajectory)}, "
+                    f"final HO={handover_trajectory[-1]:.6f}"
+                )
+
+                return handover_trajectory.astype(
+                    np.float32
+                )
+            
+        # ----------------------------------------------------
+        # Case 3: slot별 mean handover ratio
+        # ----------------------------------------------------
+        step_ratio_keys = [
+            "handover_ratio_step",
+            "handover_ratio_per_step",
+            "handover_step_ratio",
+        ]
+
+        for key in step_ratio_keys:
+            if key not in data.files:
+                continue
+
+            step_ratio = np.asarray(
+                data[key],
+                dtype=float,
+            ).reshape(-1)
+
+            denominator = np.arange(
+                1,
+                len(step_ratio) + 1,
+                dtype=float,
+            )
+
+            trajectory = (
+                np.cumsum(step_ratio)
+                / denominator
+            )
+
+            return trajectory.astype(
+                np.float32
+            )
+
+        # ----------------------------------------------------
+        # Case 4: [T, U] 사용자별 handover indicator
+        # ----------------------------------------------------
+        indicator_keys = [
+            "handover_indicator_mat",
+            "handover_flags",
+            "handover_mat",
+        ]
+
+        for key in indicator_keys:
+            if key not in data.files:
+                continue
+
+            indicator_mat = np.asarray(
+                data[key],
+                dtype=float,
+            ).squeeze()
+
+            if indicator_mat.ndim != 2:
+                raise ValueError(
+                    f"'{key}' must be 2-D, "
+                    f"but got {indicator_mat.shape}"
+                )
+
+            # [U, T] -> [T, U]
+            if (
+                indicator_mat.shape[0]
+                < indicator_mat.shape[1]
+            ):
+                indicator_mat = (
+                    indicator_mat.T
+                )
+
+            step_ratio = np.mean(
+                indicator_mat,
+                axis=1,
+            )
+
+            denominator = np.arange(
+                1,
+                len(step_ratio) + 1,
+                dtype=float,
+            )
+
+            trajectory = (
+                np.cumsum(step_ratio)
+                / denominator
+            )
+
+            return trajectory.astype(
+                np.float32
+            )
+
+        handover_keys = [
+            key
+            for key in data.files
+            if (
+                "handover" in key.lower()
+                or key.lower().startswith("ho_")
+            )
+        ]
+
+        raise KeyError(
+            f"No usable handover trajectory in {npz_path}\n"
+            f"Handover-related keys: {handover_keys}\n"
+            f"Available keys: {data.files}"
+        )
 
 def to_finite_mean(values):
     values = np.asarray(
@@ -800,6 +1031,8 @@ def save_algorithm_summary(
     bs_on_matrices = []
     on_ratio_trajectories = []
 
+    handover_trajectories = []
+
     throughput_per_seed = []
     fairness_per_seed = []
 
@@ -814,12 +1047,23 @@ def save_algorithm_summary(
                 eval_path
             )
 
+            handover_trajectory = (
+                load_handover_trajectory(
+                    eval_path
+                )
+            )
+
             T = min(
                 STEPS_PER_EPISODE,
                 bs_on_mat.shape[1],
+                len(handover_trajectory),
             )
 
             bs_on_mat = bs_on_mat[:, :T]
+
+            handover_trajectory = (
+                handover_trajectory[:T]
+            )
 
             mean_on_per_slot = np.mean(
                 bs_on_mat,
@@ -839,6 +1083,10 @@ def save_algorithm_summary(
                 mean_on_per_slot
             )
 
+            handover_trajectories.append(
+                handover_trajectory
+            )
+
             throughput_per_seed.append(
                 throughput_value
             )
@@ -854,6 +1102,7 @@ def save_algorithm_summary(
             print(
                 f"[{algorithm} | seed={seed}] "
                 f"ON={np.mean(mean_on_per_slot):.6f}, "
+                f"Final HO={handover_trajectory[-1]:.6f}, "
                 f"Throughput={throughput_value:.6f}, "
                 f"Fairness={fairness_value:.6f}"
             )
@@ -870,8 +1119,16 @@ def save_algorithm_summary(
         )
 
     min_time_length = min(
-        len(trajectory)
-        for trajectory in on_ratio_trajectories
+        min(
+            len(trajectory)
+            for trajectory
+            in on_ratio_trajectories
+        ),
+        min(
+            len(trajectory)
+            for trajectory
+            in handover_trajectories
+        ),
     )
 
     min_bs_count = min(
@@ -885,9 +1142,80 @@ def save_algorithm_summary(
             for trajectory in on_ratio_trajectories
         ],
         axis=0,
-    )
+    ).astype(np.float32)
     # [S, T]
 
+
+    handover_trajectory_per_seed = np.stack(
+        [
+            trajectory[:min_time_length]
+            for trajectory in handover_trajectories
+        ],
+        axis=0,
+    ).astype(np.float32)
+    # [S, T]
+
+
+    # ========================================================
+    # Seed 통계의 자유도
+    # 반드시 ON/HO 통계 계산 전에 정의
+    # ========================================================
+    ddof = (
+        1
+        if len(successful_seeds) > 1
+        else 0
+    )
+
+
+    # ========================================================
+    # Handover trajectory 통계
+    # ========================================================
+    handover_trajectory_mean = np.mean(
+        handover_trajectory_per_seed,
+        axis=0,
+    ).astype(np.float32)
+
+    handover_trajectory_var = np.var(
+        handover_trajectory_per_seed,
+        axis=0,
+        ddof=ddof,
+    ).astype(np.float32)
+
+    handover_trajectory_std = np.std(
+        handover_trajectory_per_seed,
+        axis=0,
+        ddof=ddof,
+    ).astype(np.float32)
+
+
+    overall_handover_ratio_per_seed = (
+        handover_trajectory_per_seed[:, -1]
+    )
+
+    overall_handover_ratio_mean = float(
+        np.mean(
+            overall_handover_ratio_per_seed
+        )
+    )
+
+    overall_handover_ratio_var = float(
+        np.var(
+            overall_handover_ratio_per_seed,
+            ddof=ddof,
+        )
+    )
+
+    overall_handover_ratio_std = float(
+        np.std(
+            overall_handover_ratio_per_seed,
+            ddof=ddof,
+        )
+    )
+
+
+    # ========================================================
+    # BS ON matrix
+    # ========================================================
     bs_on_mat_per_seed = np.stack(
         [
             matrix[
@@ -900,12 +1228,10 @@ def save_algorithm_summary(
     )
     # [S, B, T]
 
-    ddof = (
-        1
-        if len(successful_seeds) > 1
-        else 0
-    )
 
+    # ========================================================
+    # ON-ratio trajectory 통계
+    # ========================================================
     trajectory_mean = np.mean(
         trajectory_per_seed,
         axis=0,
@@ -941,6 +1267,8 @@ def save_algorithm_summary(
         overall_on_ratio_per_seed,
         ddof=ddof,
     )
+
+
     # ========================================================
     # Throughput/Fairness seed 통계
     # ========================================================
@@ -982,7 +1310,7 @@ def save_algorithm_summary(
         (
             f"{safe_algorithm_name}_"
             f"{len(successful_seeds)}seeds_"
-            "on_ratio.npz"
+            "evaluation_summary.npz"
         ),
     )
 
@@ -1088,6 +1416,43 @@ def save_algorithm_summary(
             fairness_std,
             dtype=float,
         ),
+        # ====================================================
+        # Handover trajectory
+        # ====================================================
+        handover_ratio_trajectory_per_seed=(
+            handover_trajectory_per_seed
+        ),
+
+        handover_ratio_trajectory_mean=(
+            handover_trajectory_mean
+        ),
+
+        handover_ratio_trajectory_var=(
+            handover_trajectory_var
+        ),
+
+        handover_ratio_trajectory_std=(
+            handover_trajectory_std
+        ),
+
+        overall_handover_ratio_per_seed=(
+            overall_handover_ratio_per_seed
+        ),
+
+        overall_handover_ratio_mean=np.asarray(
+            overall_handover_ratio_mean,
+            dtype=float,
+        ),
+
+        overall_handover_ratio_var=np.asarray(
+            overall_handover_ratio_var,
+            dtype=float,
+        ),
+
+        overall_handover_ratio_std=np.asarray(
+            overall_handover_ratio_std,
+            dtype=float,
+        ),
     )
 
     print(
@@ -1148,9 +1513,48 @@ if __name__ == "__main__":
                 ),
             )
 
+            # =================================================
+            # 1. Seed별 evaluation 실행
+            # =================================================
+            should_run = (
+                OVERWRITE_EXISTING
+                or not os.path.exists(eval_npz_path)
+            )
+
+            if should_run:
+                print(
+                    f"\n[RUN] {algorithm}, seed={seed}"
+                )
+                print(
+                    f"Save path: {eval_npz_path}"
+                )
+
+                try:
+                    run_single_evaluation(
+                        algorithm=algorithm,
+                        seed=seed,
+                        save_npz_path=eval_npz_path,
+                    )
+
+                except Exception as error:
+                    print(
+                        f"[ERROR] {algorithm}, seed={seed}: "
+                        f"{type(error).__name__}: {error}"
+                    )
+                    continue
+
+            else:
+                print(
+                    f"[SKIP] Existing result: "
+                    f"{algorithm}, seed={seed}"
+                )
+
+            # =================================================
+            # 2. 결과 파일 생성 여부 확인
+            # =================================================
             if not os.path.exists(eval_npz_path):
                 print(
-                    f"[WARNING] Missing eval file: "
+                    f"[WARNING] Evaluation result was not saved: "
                     f"{eval_npz_path}"
                 )
                 continue
@@ -1168,6 +1572,9 @@ if __name__ == "__main__":
                 seed
             )
 
+        # =====================================================
+        # 3. Algorithm별 multi-seed summary 생성
+        # =====================================================
         if not eval_paths:
             print(
                 f"[WARNING] No successful results "

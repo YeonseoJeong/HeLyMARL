@@ -16,8 +16,8 @@ NPZ_FILES = {
         "MaxSNR_eval_lambda_0.0.npz"
     ),
     "PF-HAPPO": (
-        "results/results_baselines/"
-        "ConstrainedHAPPO_pf_eval_hard_kappa_0.03_use_dimensionless.npz"
+        "results/policy_improvement/pf/"
+        "ConstrainedHAPPO_pf_gamma_0.5_final_eval_kappa_0.03.npz"
     ),
     "Jensen-HAPPO": (
         "results/results_baselines/"

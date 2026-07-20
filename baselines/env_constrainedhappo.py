@@ -107,6 +107,8 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
             for u in self.users
         }
 
+        obs = self._get_observations()
+
         return obs
         
     def reset_dual_variables(self):
@@ -275,6 +277,8 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
             self.episode_ho_hist[ue_id].append(h_u)
             self.episode_ho_count[ue_id] += h_u
 
+        local_obs, global_obs = self._get_observations()
+
         # 2. old dual variables 기록
         old_mu_E_b = self.mu_E_b.copy()
         old_nu_H_u = self.nu_H_u.copy()
@@ -442,10 +446,25 @@ class JensenHAPPOEnvironment(ConstrainedHAPPOEnvironment):
 
 class PFHAPPOEnvironment(ConstrainedHAPPOEnvironment):
     """
-    PF-HAPPO reward:
-        r_t = sum_u R_u(t) / (Rbar_u(t-1) + eps)
-    """
+    Generalized PF-HAPPO:
 
+        weight_u = min(
+            1 / (Rbar_u + eps)^gamma,
+            pf_weight_max
+        )
+
+        utility = sum_u weight_u * R_u
+    """
+    # def __init__(
+    #     self,
+    #     *args,
+    #     pf_gamma: float = 1.0, # 기존 pf, 0.0: max Rate
+    #     **kwargs,
+    # ):
+    #     super().__init__(*args, **kwargs)
+
+    #     self.pf_gamma = float(pf_gamma)
+        
     def _compute_utility(self, served_rates: Dict[int, float]) -> float:
         utility = 0.0
 
@@ -454,12 +473,20 @@ class PFHAPPOEnvironment(ConstrainedHAPPOEnvironment):
 
             r = float(served_rates[ue_id])
             avg_r_prev = float(self.avg_rate_u[ue_id])
+            denominator = max(
+                avg_r_prev,
+                self.rate_eps,
+            ) #** self.pf_gamma
 
-            utility += r / max(avg_r_prev, self.rate_eps)
+            utility += r / denominator
 
         return float(utility)
     
     def _bs_candidate_score(self, ue_id: int, rate: float) -> float:
         avg_r_prev = float(self.avg_rate_u[ue_id])
-        return float(rate / max(avg_r_prev, self.rate_eps))
+        denominator = max(
+            avg_r_prev,
+            self.rate_eps,
+        ) #** self.pf_gamma
+        return float(rate / denominator)
     

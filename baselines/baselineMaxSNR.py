@@ -17,8 +17,7 @@ from collections import defaultdict
 
 from env.basestation import BaseStation, SmallCellBaseStation
 from env.user_equipment import UserEquipment
-from env.core import generate_triangle_coverage, generate_five_bs_coverage
-
+from env.core import generate_triangle_coverage
 
 ################################################
 ## MAX-SNR BASELINE WITH ENERGY BUDGET
@@ -26,12 +25,15 @@ from env.core import generate_triangle_coverage, generate_five_bs_coverage
 
 class MaxSNRBaseline:
     """
-    Max-SNR / Max-Rate baseline with energy budget.
+    Max-SNR baseline with finite-horizon energy and handover budgets.
 
     Policy:
-    1) Each UE requests the BS with the highest achievable rate.
-    2) Each BS schedules one UE with the highest achievable rate among requesters.
-    3) BS activation is constrained by power_budget_ratio using a hard window budget.
+    1) Each UE requests the BS with the highest instantaneous SNR.
+    2) Each BS schedules the requester with the highest instantaneous SNR.
+       Inter-cell interference is not used for association or scheduling.
+    3) After BS activation/scheduling is finalized, the actual service rate
+       is computed from the current-slot SINR with fading on both desired
+       and interference links.
     """
 
     def __init__(self,
@@ -48,6 +50,8 @@ class MaxSNRBaseline:
 
         self.users = users
         self.base_stations = [bs for bs in base_stations if bs.bs_id != 0]
+        self.user_map = {ue.ue_id: ue for ue in self.users}
+        self.bs_map = {bs.bs_id: bs for bs in self.base_stations}
 
         self.power_budget_ratio = float(power_budget_ratio)
         self.max_slots = int(max_slots)
@@ -59,10 +63,6 @@ class MaxSNRBaseline:
         self.hard_window_len = int(hard_window_len)
         self.lambda_E = float(lambda_E)
         self.kappa = float(kappa)
-
-        self.avg_rate_pf = {ue.ue_id: 1e-3 for ue in users}
-        self.pf_beta = 0.01
-        self.pf_eps = 1e-6
 
         self.P_max = {
             bs.bs_id: 10 ** ((bs.tx_power_dbm - 30) / 10)
@@ -95,9 +95,6 @@ class MaxSNRBaseline:
         # Previous serving BS for handover
         self.m_u = {ue.ue_id: None for ue in users}
         self.G_u = {ue.ue_id: 0.0 for ue in users}
-
-        # Previous power for interference during decision
-        self.prev_power = {bs.bs_id: 0.0 for bs in self.base_stations}
 
         # Tracking
         self.associations_history = []
@@ -162,64 +159,168 @@ class MaxSNRBaseline:
 
     # =========================================================
     # PHY layer
-    # =========================================================    
-    def calculate_achievable_rate(self,
-                                  user_id: int,
-                                  bs_id: int,
-                                  interferer_status: dict = None) -> float:
+    # =========================================================
+    def calculate_snr(
+        self,
+        user_id: int,
+        bs_id: int,
+    ) -> float:
         """
-        Returns achievable rate [Gbps] based on SNR only.
-        Inter-cell interference is ignored for the Max-SNR baseline.
-        """
-        user = next(u for u in self.users if u.ue_id == user_id)
-        bs = next(b for b in self.base_stations if b.bs_id == bs_id)
+        Instantaneous SNR used for UE association and BS scheduling.
 
-        dist = max(1.0, bs.distance_to(user.position))
+        Inter-cell interference is intentionally ignored because this is
+        the Max-SNR baseline. Desired-link path loss and fading are applied.
+        """
+        user = self.user_map[user_id]
+        bs = self.bs_map[bs_id]
+
+        if not bs.can_serve(user.position):
+            return 0.0
+
+        dist = max(
+            1.0,
+            bs.distance_to(user.position),
+        )
         rx_dbm = bs.receive_power(dist)
 
-        gain = self.channel_gains.get(user_id, {}).get(bs_id, 1.0)
-        rx_dbm += 10 * np.log10(gain + 1e-12)
+        desired_gain = self.channel_gains.get(
+            user_id, {}
+        ).get(bs_id, 1.0)
+        rx_dbm += 10.0 * np.log10(
+            desired_gain + 1e-12
+        )
 
-        rx_watts = 10 ** (rx_dbm / 10) / 1000
+        rx_watts = (
+            10.0 ** (rx_dbm / 10.0)
+            / 1000.0
+        )
 
-        interference = 0.0
+        snr = rx_watts / max(
+            self.noise_watts,
+            1e-15,
+        )
+        return max(0.0, float(snr))
+
+    def calculate_snr_rate(
+        self,
+        user_id: int,
+        bs_id: int,
+    ) -> float:
+        """
+        Interference-free rate proxy [Gbps] derived from instantaneous SNR.
+
+        This helper is retained for diagnostics only. The Max-SNR policy
+        itself compares instantaneous SNR values directly.
+        """
+        bs = self.bs_map[bs_id]
+        snr = self.calculate_snr(user_id, bs_id)
+        rate_bps = bs.bandwidth * np.log2(1.0 + snr)
+        return max(0.0, float(rate_bps / 1e9))
+
+    def calculate_scheduled_rate(
+        self,
+        user_id: int,
+        serving_bs_id: int,
+        tx_power_map: dict,
+    ) -> float:
+        """
+        Actual current-slot service rate [Gbps] based on SINR.
+
+        Only BSs with positive current-slot transmit power are interference
+        sources. Fading is applied to both the desired and interference links.
+        """
+        user = self.user_map[user_id]
+        serving_bs = self.bs_map[serving_bs_id]
+
+        if not serving_bs.can_serve(user.position):
+            return 0.0
+
+        # Desired link
+        dist = max(
+            1.0,
+            serving_bs.distance_to(user.position),
+        )
+        rx_dbm = serving_bs.receive_power(dist)
+
+        desired_gain = self.channel_gains.get(
+            user_id, {}
+        ).get(serving_bs_id, 1.0)
+        rx_dbm += 10.0 * np.log10(
+            desired_gain + 1e-12
+        )
+
+        rx_watts = (
+            10.0 ** (rx_dbm / 10.0)
+            / 1000.0
+        )
+
+        # Current-slot interference links
+        interference_watts = 0.0
+
         for other_bs in self.base_stations:
-            if other_bs.bs_id == bs_id:
+            other_bs_id = other_bs.bs_id
+
+            if other_bs_id == serving_bs_id:
                 continue
 
-            if interferer_status is None:
-                is_on = self.prev_power.get(other_bs.bs_id, 0.0) > 0.0
-            else:
-                is_on = interferer_status.get(other_bs.bs_id, 0) == 1
-
-            if not is_on:
+            p_now = float(
+                tx_power_map.get(other_bs_id, 0.0)
+            )
+            if p_now <= 0.0:
                 continue
 
-            other_dist = max(1.0, other_bs.distance_to(user.position))
-            other_rx_dbm = other_bs.receive_power(other_dist)
-            interference += 10 ** (other_rx_dbm / 10) / 1000
+            other_dist = max(
+                1.0,
+                other_bs.distance_to(user.position),
+            )
+            other_rx_dbm = other_bs.receive_power(
+                other_dist
+            )
 
-        sinr = rx_watts / (self.noise_watts + interference)
-        snr = rx_watts / self.noise_watts
-        rate_bps = bs.bandwidth * np.log2(1.0 + sinr)
+            # Fading of the interfering BS -> current UE link
+            interference_gain = self.channel_gains.get(
+                user_id, {}
+            ).get(other_bs_id, 1.0)
+            other_rx_dbm += 10.0 * np.log10(
+                interference_gain + 1e-12
+            )
 
-        return max(0.0, rate_bps / 1e9)
+            other_rx_watts = (
+                10.0 ** (other_rx_dbm / 10.0)
+                / 1000.0
+            )
 
-    def compute_pf_score(self, ue_id: int, bs_id: int) -> float:
-        rate = self.calculate_achievable_rate(ue_id, bs_id)
-        avg_rate = self.avg_rate_pf.get(ue_id, 1e-3)
+            # receive_power() corresponds to the BS full transmit power.
+            # Scale it when tx_power_map contains a fractional power value.
+            max_power = max(
+                float(self.P_max[other_bs_id]),
+                1e-12,
+            )
+            power_scale = p_now / max_power
 
-        return np.log(rate + self.pf_eps) - np.log(avg_rate + self.pf_eps)
-    
+            interference_watts += (
+                other_rx_watts * power_scale
+            )
+
+        sinr = rx_watts / (
+            self.noise_watts + interference_watts
+        )
+        rate_bps = (
+            serving_bs.bandwidth
+            * np.log2(1.0 + sinr)
+        )
+
+        return max(0.0, float(rate_bps / 1e9))
+
     # =========================================================
     # Max-SNR decision
     # =========================================================
     def user_association(self, t: int) -> dict:
         """
-        Each UE requests the BS with the highest achievable rate.
-        In this implementation, achievable rate is used as the Max-SNR proxy.
+        Each UE requests the BS with the highest instantaneous SNR.
+        Inter-cell interference is ignored during association.
 
-        hard handover action masking
+        Hard handover action masking is applied.
         """
         associations = {}
 
@@ -238,13 +339,13 @@ class MaxSNRBaseline:
                 candidate_bs_ids = list(valid_bs_ids)
 
             best_bs = None
-            best_rate = -np.inf
+            best_snr = -np.inf
 
             for bs_id in candidate_bs_ids:
-                rate = self.calculate_achievable_rate(ue_id, bs_id)
+                snr = self.calculate_snr(ue_id, bs_id)
 
-                if rate > best_rate:
-                    best_rate = rate
+                if snr > best_snr:
+                    best_snr = snr
                     best_bs = bs_id
 
             associations[ue_id] = best_bs
@@ -253,7 +354,8 @@ class MaxSNRBaseline:
 
     def bs_scheduling(self, associations: dict) -> tuple:
         """
-        Each BS schedules one UE with the highest achievable rate among requesters.
+        Each BS schedules the requester with the highest instantaneous SNR.
+        Inter-cell interference is ignored during scheduling.
         """
         bs_status = {}
         scheduled_users = {}
@@ -272,13 +374,16 @@ class MaxSNRBaseline:
                 continue
 
             best_ue = None
-            best_rate = -np.inf
+            best_snr = -np.inf
 
             for ue_id in proposers[bs_id]:
-                rate = self.compute_pf_score(ue_id, bs_id)
+                snr = self.calculate_snr(
+                    ue_id,
+                    bs_id,
+                )
 
-                if rate > best_rate:
-                    best_rate = rate
+                if snr > best_snr:
+                    best_snr = snr
                     best_ue = ue_id
             
             bs_status[bs_id] = 1
@@ -442,24 +547,34 @@ class MaxSNRBaseline:
 
         bs_status, scheduled_users = self.apply_energy_budget(bs_status, scheduled_users)
 
-        actual_rates = {u.ue_id: 0.0 for u in self.users}
+        # Current-slot transmit powers after the hard energy mask.
+        tx_power_map = {
+            bs_id: (
+                float(bs_status.get(bs_id, 0))
+                * self.P_max[bs_id]
+            )
+            for bs_id in self.P_max
+        }
+
+        actual_rates = {
+            u.ue_id: 0.0
+            for u in self.users
+        }
 
         for bs_id, ue_id in scheduled_users.items():
-            if ue_id is not None and bs_status.get(bs_id, 0) == 1:
-                actual_rate = self.calculate_achievable_rate(
-                    ue_id,
-                    bs_id,
-                    interferer_status=bs_status
+            if (
+                ue_id is not None
+                and bs_status.get(bs_id, 0) == 1
+            ):
+                actual_rate = self.calculate_scheduled_rate(
+                    user_id=ue_id,
+                    serving_bs_id=bs_id,
+                    tx_power_map=tx_power_map,
                 )
                 actual_rates[ue_id] = actual_rate
-                self.user_rate_history[ue_id].append(actual_rate)
-
-        for ue in self.users:
-            ue_id = ue.ue_id
-            self.avg_rate_pf[ue_id] = (
-                (1.0 - self.pf_beta) * self.avg_rate_pf[ue_id]
-                + self.pf_beta * actual_rates.get(ue_id, 0.0)
-            )
+                self.user_rate_history[ue_id].append(
+                    actual_rate
+                )
 
         h_u, handover_count = self.compute_handover(scheduled_users)
 
@@ -490,11 +605,6 @@ class MaxSNRBaseline:
             self.ho_used_in_window = {
                 ue.ue_id: 0 for ue in self.users
             }
-
-        self.prev_power = {
-            bs_id: bs_status.get(bs_id, 0) * self.P_max[bs_id]
-            for bs_id in self.P_max
-        }
 
         self.associations_history.append(scheduled_users)
         self.bs_status_history.append(bs_status)
@@ -805,27 +915,13 @@ if __name__ == "__main__":
         print(f"{'='*80}\n")
 
         sbs_positions = generate_triangle_coverage(area_size, 35)
-        # sbs_positions = generate_five_bs_coverage(area_size, 35)
-
+        
         sbs_list = [
             SmallCellBaseStation(i + 1, pos, 10, 35)
             for i, pos in enumerate(sbs_positions)
         ]
 
-        # boundary_user_positions = sample_users_near_bs_boundaries(
-        #     sbs_positions=sbs_positions,
-        #     num_users=num_users,
-        #     area_size=area_size,
-        #     noise_std=5.0,
-        #     min_pos=10,
-        #     max_pos=90,
-        # )
-
-        # users = [
-        #     UserEquipment(i + 1, boundary_user_positions[i])
-        #     for i in range(num_users)
-        # ]
-
+        
         users = [
             UserEquipment(i + 1, (np.random.uniform(10, 90), np.random.uniform(10, 90)))
             for i in range(num_users)

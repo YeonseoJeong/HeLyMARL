@@ -735,6 +735,7 @@ class HAPPOTrainer:
         update_episode_history = []
         handover_ratio_history = []
         episode_handover_ratio_history = []
+        episode_handover_gap_history = []
 
         critic_loss_history = []
         actor_ue_loss_history = []
@@ -1068,12 +1069,47 @@ class HAPPOTrainer:
             # 여기서 env.reset()은 아직 호출하지 않음.
             # 다음 episode 시작에서 reset됨.
             # --------------------------------------------------
-            episode_reward_history.append(float(ep_reward_sum / max(1, steps_per_episode)))
+            episode_reward_history.append(
+                float(
+                    ep_reward_sum
+                    / max(1, steps_per_episode)
+                )
+            )
+
             episode_start = ep * steps_per_episode
             episode_end = len(handover_ratio_history)
 
-            episode_handover_ratio_history.append(float(np.mean(handover_ratio_history[episode_start:episode_end])))
-            
+            episode_ho_slots = np.asarray(
+                handover_ratio_history[
+                    episode_start:episode_end
+                ],
+                dtype=np.float64,
+            )
+            # 첫 slot의 HO가 항상 0이므로,
+            # 논문의 T-1 분모에 맞추려면 첫 slot 제외
+            if episode_ho_slots.size > 1:
+                episode_ho_ratio = float(
+                    np.sum(episode_ho_slots[1:])
+                    / (episode_ho_slots.size - 1)
+                )
+            elif episode_ho_slots.size == 1:
+                episode_ho_ratio = 0.0
+            else:
+                episode_ho_ratio = np.nan
+
+            episode_ho_gap = (
+                episode_ho_ratio
+                - float(self.env.kappa)
+            )
+
+            episode_handover_ratio_history.append(
+                episode_ho_ratio
+            )
+
+            episode_handover_gap_history.append(
+                episode_ho_gap
+            )    
+
             if self._is_constrained_env():
                 episode_mu_E_last_history.append(float(mu_E_mean_history[-1]))
                 episode_nu_H_last_history.append(float(nu_H_mean_history[-1]))
@@ -1101,6 +1137,9 @@ class HAPPOTrainer:
                 print(
                     f"[EP END] Ep {ep+1:4d} | "
                     f"AvgReward:{episode_reward_history[-1]:.3f} | "
+                    f"HO:{episode_handover_ratio_history[-1]:.5f} | "
+                    f"Kappa:{float(self.env.kappa):.5f} | "
+                    f"HOGap:{episode_handover_gap_history[-1]:+.5f} | "
                     f"Last Qmean:{episode_Q_last_history[-1]:.3f} | "
                     f"Last Zmean:{episode_Z_last_history[-1]:.3f} | "
                     f"Last Gmean:{episode_G_last_history[-1]:.3f}"
@@ -1155,6 +1194,8 @@ class HAPPOTrainer:
             "global_reward": global_reward_history,
             "handover_ratio": handover_ratio_history,
             "episode_handover_ratio": episode_handover_ratio_history,
+            "episode_handover_gap":episode_handover_gap_history,
+            "kappa": float(self.env.kappa),
 
             # final-policy evaluation objective
             "eval_episode_idx_history":
@@ -1256,6 +1297,10 @@ class HAPPOTrainer:
         
         handover_count_history = []       # slot-wise total handover count
         handover_ratio_history = []       # slot-wise handover ratio = HO / #UE
+        handover_count_per_user = np.zeros(
+            self.env.n_agents,
+            dtype=np.float64,
+        )
 
         served_ratio_history = []         # optional QoE
         outage_ratio_history = []         # optional QoE
@@ -1328,7 +1373,33 @@ class HAPPOTrainer:
                 # --------------------------------------------------
                 # Handover
                 # --------------------------------------------------
-                ho_count = float(info["total_HO_count"])
+                handover_u = info.get("handover_u", {})
+
+                if isinstance(handover_u, dict):
+                    ho_flags = np.asarray(
+                        [
+                            float(handover_u[u.ue_id])
+                            for u in self.env.users
+                        ],
+                        dtype=np.float64,
+                    )
+                else:
+                    ho_flags = np.asarray(
+                        handover_u,
+                        dtype=np.float64,
+                    ).reshape(-1)
+
+                if ho_flags.size != self.env.n_agents:
+                    raise ValueError(
+                        f"handover_u size={ho_flags.size}, "
+                        f"expected n_agents={self.env.n_agents}"
+                    )
+
+                # 사용자별 누적 handover 횟수
+                handover_count_per_user += ho_flags
+
+                # 기존 slot-wise 값
+                ho_count = float(np.sum(ho_flags))
                 ho_ratio = ho_count / max(1, self.env.n_agents)
 
                 handover_count_history.append(ho_count)
@@ -1471,6 +1542,14 @@ class HAPPOTrainer:
         print(f"Mean HO ratio:   {float(np.mean(episode_handover_ratio_mean)):.4f}")
         print(f"{'='*84}\n")
 
+        # 첫 slot에서는 handover가 없으므로 T-1 기준
+        total_eval_steps = n_episodes * steps_per_episode
+
+        handover_ratio_per_user = (
+            handover_count_per_user
+            / max(total_eval_steps - n_episodes, 1)
+        )
+
         results = {
             # slot-wise histories
             "throughput_history": throughput_history,
@@ -1483,6 +1562,8 @@ class HAPPOTrainer:
 
             "handover_count_history": handover_count_history,
             "handover_ratio_history": handover_ratio_history,
+            "handover_count_per_user": handover_count_per_user,
+            "handover_ratio_per_user": handover_ratio_per_user,
 
             "served_ratio_history": served_ratio_history,
             "outage_ratio_history": outage_ratio_history,
@@ -1524,6 +1605,8 @@ class HAPPOTrainer:
         global_reward = np.asarray(results.get("global_reward", []), dtype=np.float32)
         handover_ratio = np.asarray(results.get("handover_ratio", []), dtype=np.float32)
         episode_handover_ratio = np.asarray(results.get("episode_handover_ratio", []), dtype=np.float32)
+        episode_handover_gap = np.asarray(results.get("episode_handover_gap", []), dtype=np.float32)
+        kappa_value = np.asarray([float(results.get("kappa", getattr(self.env, "kappa", np.nan)))], dtype=np.float32)
 
         Q_mean = np.asarray(results.get("Q_mean_history", []), dtype=np.float32)
         Z_mean = np.asarray(results.get("Z_mean_history", []), dtype=np.float32)
@@ -1653,6 +1736,8 @@ class HAPPOTrainer:
 
                     handover_ratio=handover_ratio,
                     episode_handover_ratio=episode_handover_ratio,
+                    episode_handover_gap=episode_handover_gap,
+                    kappa=kappa_value,
 
                     mu_E_mean=mu_E_mean,
                     nu_H_mean=nu_H_mean,
@@ -1709,6 +1794,8 @@ class HAPPOTrainer:
 
                     handover_ratio=handover_ratio,
                     episode_handover_ratio=episode_handover_ratio,
+                    episode_handover_gap=episode_handover_gap,
+                    kappa=kappa_value,
 
                     Q_mean=Q_mean,
                     Z_mean=Z_mean,
@@ -1742,6 +1829,8 @@ class HAPPOTrainer:
 
         handover_count = np.asarray(results.get("handover_count_history", []), dtype=np.float32)
         handover_ratio = np.asarray(results.get("handover_ratio_history", []), dtype=np.float32)
+        handover_count_per_user = np.asarray(results.get("handover_count_per_user",[]),dtype=np.float32)
+        handover_ratio_per_user = np.asarray(results.get("handover_ratio_per_user",[]),dtype=np.float32)
 
         served_ratio = np.asarray(results.get("served_ratio_history", []), dtype=np.float32)
         outage_ratio = np.asarray(results.get("outage_ratio_history", []), dtype=np.float32)
@@ -1888,6 +1977,8 @@ class HAPPOTrainer:
             handover_count=handover_count,
             handover_ratio=handover_ratio,
             handover_ratio_mean=handover_ratio_mean,
+            handover_count_per_user=handover_count_per_user,
+            handover_ratio_per_user=handover_ratio_per_user,
             served_ratio=served_ratio,
             outage_ratio=outage_ratio,
 

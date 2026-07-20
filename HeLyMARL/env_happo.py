@@ -69,7 +69,7 @@ class HAPPOEnvironment:
 
         # Queues
         self.Q_u = {u.ue_id: 0.1 for u in users}
-        self.Z_b = {bs.bs_id: 0.01 for bs in self.base_stations}
+        self.Z_b = {bs.bs_id: 0.0 for bs in self.base_stations}
         self.G_u = {u.ue_id: 0.0 for u in users}
         self.R_max = {u.ue_id: 5.0 for u in users}
 

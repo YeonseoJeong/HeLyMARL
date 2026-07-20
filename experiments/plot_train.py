@@ -386,16 +386,16 @@ if __name__ == "__main__":
         steps_per_episode=10000,
         compare_reward_npz_paths={
             "PF-HAPPO": (
-                "results/results_baselines/"
-                "ConstrainedHAPPO_pf_train_rewards_kappa_0.03_use_dimensionless.npz"
+                "results/policy_improvement/pf/"
+                "ConstrainedHAPPO_pf_gamma_0.5_policy_improvement_kappa_0.03.npz"
             ),
             "Jensen-HAPPO": (
-                "results/results_baselines/"
-                "ConstrainedHAPPO_jensen_train_rewards_kappa_0.03_use_dimensionless.npz"
+                "results/policy_improvement/jensen/"
+                "ConstrainedHAPPO_jensen_policy_improvement_kappa_0.03.npz"
             ),
             "HeLyMARL": (
-                "results/results_kappa/"
-                "HeLyMARL_train_rewards_kappa_0.03.npz"
+                "results/policy_improvement/HeLyMARL/"
+                "HeLyMARL_policy_improvement_lambda_0.0.npz"
             ),
         }
     )

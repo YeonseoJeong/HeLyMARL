@@ -21,6 +21,7 @@ def make_env(
     mu_max=100.0,
     nu_max=100.0,
     use_dimensionless=True,
+    # pf_gamma=0.5,
 ):
     set_seed(seed)
 
@@ -75,7 +76,7 @@ def make_env(
 
     if variant == "pf":
         return PFHAPPOEnvironment(**common_kwargs)
-
+    
     raise ValueError(f"Unknown variant: {variant}")
 
 
@@ -126,12 +127,13 @@ def save_dual_history(env, save_path):
 
 if __name__ == "__main__":
     seed = 0
-    checkpoint_eval_seeds = [1000,1001,1002,]
+    checkpoint_eval_seeds = [1000,1001,1002,1003,1004]
     final_eval_seed = 2000
 
     variants = ["pf"]
     kappa_list = [0.03]
     lambda_E = 0.0
+    # pf_gamma = 0.5
 
     steps_per_episode = 10000
     train_episodes = 10
@@ -142,10 +144,6 @@ if __name__ == "__main__":
     eta_nu = 0.5
     mu_max = 100.0
     nu_max = 100.0
-
-    resume_training = False
-    resume_checkpoint = "results/policy_improvement/pf/checkpoint_step_0010000_episode_0001_end.pt"
-    completed_episodes = 1
 
     save_dir = "results/policy_improvement"
     os.makedirs(save_dir, exist_ok=True)
@@ -168,6 +166,7 @@ if __name__ == "__main__":
                 mu_max=mu_max,
                 nu_max=nu_max,
                 use_dimensionless=False,
+                # pf_gamma=pf_gamma,
             )
 
             # 각 training episode 종료 후
@@ -184,48 +183,26 @@ if __name__ == "__main__":
                 mu_max=mu_max,
                 nu_max=nu_max,
                 use_dimensionless=False,
+                # pf_gamma=pf_gamma,
             )
             set_seed(seed)
             trainer_soft = make_trainer(env_soft, eval_env=env_checkpoint_eval)
 
-            if resume_training:
-                if not os.path.exists(resume_checkpoint):
-                    raise FileNotFoundError(
-                        f"Resume checkpoint not found: {resume_checkpoint}"
-                    )
-
-                trainer_soft.load_model(resume_checkpoint)
-
-                print(
-                    f"✅ Resume model loaded: {resume_checkpoint}"
-                )
-
-
+            # gamma_tag = f"gamma_{pf_gamma}"
             train_npz_path = (
-                f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_policy_improvement_kappa_{kappa}.npz"
+                f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_policy_improvement_eval5seeds_kappa_{kappa}.npz"
             )
 
             model_path = (
-                f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_final_model_kappa_{kappa}.pt"
+                f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_final_model_eval5seeds_kappa_{kappa}.pt"
             )
 
             dual_npz_path = (
-                f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_dual_history_kappa_{kappa}.npz"
+                f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_dual_history_eval5seeds_kappa_{kappa}.npz"
             )
-
-            remaining_episodes = (
-                train_episodes - completed_episodes
-                if resume_training
-                else train_episodes
-            )
-
-            if remaining_episodes <= 0:
-                raise ValueError(
-                    "remaining_episodes must be positive."
-                )
             
             trainer_soft.train(
-                n_episodes=remaining_episodes,
+                n_episodes=train_episodes,
                 steps_per_episode=steps_per_episode,
                 update_interval=update_interval,
                 save_npz_path=train_npz_path,
@@ -233,7 +210,7 @@ if __name__ == "__main__":
                 eval_n_episodes=len(checkpoint_eval_seeds),
                 eval_steps_per_episode=steps_per_episode,
                 eval_seeds=checkpoint_eval_seeds,
-                eval_deterministic=True,
+                eval_deterministic=False,
                 policy_improvement_dir=f"{variant_dir}/checkpoints",
                 checkpoint_every_updates_early=8,
                 checkpoint_every_updates_mid=40,
@@ -247,34 +224,35 @@ if __name__ == "__main__":
 
             save_dual_history(env_soft, dual_npz_path)
 
-            print(f"\n=== Hard Eval Constrained HAPPO-{variant.upper()} | kappa = {kappa} ===")
+            # print(f"\n=== Hard Eval Constrained HAPPO-{variant.upper()} | kappa = {kappa} ===")
 
-            env_hard = make_env(
-                seed=final_eval_seed,
-                variant=variant,
-                lambda_E=lambda_E,
-                kappa=kappa,
-                use_hard_constraint=True,
-                hard_window_len=steps_per_episode,
-                eta_mu=eta_mu,
-                eta_nu=eta_nu,
-                mu_max=mu_max,
-                nu_max=nu_max,
-                use_dimensionless=False,
-            )
+            # env_hard = make_env(
+            #     seed=final_eval_seed,
+            #     variant=variant,
+            #     lambda_E=lambda_E,
+            #     kappa=kappa,
+            #     use_hard_constraint=True,
+            #     hard_window_len=steps_per_episode,
+            #     eta_mu=eta_mu,
+            #     eta_nu=eta_nu,
+            #     mu_max=mu_max,
+            #     nu_max=nu_max,
+            #     use_dimensionless=False,
+            #     pf_gamma=pf_gamma,
+            # )
 
-            trainer_hard = make_trainer(env_hard)
-            trainer_hard.load_model(model_path)
+            # trainer_hard = make_trainer(env_hard)
+            # trainer_hard.load_model(model_path)
 
-            hard_eval_npz_path = (
-                f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_final_eval_kappa_{kappa}.npz"
-            )
-            set_seed(final_eval_seed)
+            # hard_eval_npz_path = (
+            #     f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_final_eval_kappa_{kappa}.npz"
+            # )
+            # set_seed(final_eval_seed)
 
-            trainer_hard.evaluate(
-                n_episodes=eval_episode,
-                steps_per_episode=steps_per_episode,
-                save_npz_path=hard_eval_npz_path,
-            )
+            # trainer_hard.evaluate(
+            #     n_episodes=eval_episode,
+            #     steps_per_episode=steps_per_episode,
+            #     save_npz_path=hard_eval_npz_path,
+            # )
 
     print("\n✅ Completed!\n")
