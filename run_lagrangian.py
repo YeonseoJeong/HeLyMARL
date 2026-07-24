@@ -6,7 +6,7 @@ from env.user_equipment import UserEquipment
 from env.core import generate_triangle_coverage
 
 from HeLyMARL.utils_happo import set_seed
-from HeLyMARL.trainer_happo import HAPPOTrainer
+from HeLyMARL.trainer_mappo import MAPPOTrainer
 from baselines.env_constrainedhappo import JensenHAPPOEnvironment, PFHAPPOEnvironment
 
 def make_env(
@@ -81,7 +81,7 @@ def make_env(
 
 
 def make_trainer(env, eval_env = None):
-    return HAPPOTrainer(
+    return MAPPOTrainer(
         env=env,
         eval_env = eval_env,
         lr_actor_ue=3e-4,

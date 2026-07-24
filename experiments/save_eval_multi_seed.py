@@ -18,7 +18,7 @@ from env.core import generate_triangle_coverage
 
 from HeLyMARL.utils_happo import set_seed
 from HeLyMARL.env_happo import HAPPOEnvironment
-from HeLyMARL.trainer_happo import HAPPOTrainer
+from HeLyMARL.trainer_mappo import HAPPOTrainer
 
 
 # ============================================================
@@ -221,7 +221,7 @@ def evaluate_constrained_happo(
             PFHAPPOEnvironment,
         )
 
-        from HeLyMARL.trainer_happo import (
+        from HeLyMARL.trainer_mappo import (
             HAPPOTrainer,
         )
 

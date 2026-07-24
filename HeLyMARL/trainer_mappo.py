@@ -18,7 +18,7 @@ from HeLyMARL.networks_happo import (
 from HeLyMARL.utils_happo import moving_avg, block_avg_1d, set_seed
 
 
-class HAPPOTrainer:
+class MAPPOTrainer:
     def __init__(
         self,
         env,
@@ -544,6 +544,141 @@ class HAPPOTrainer:
     # =========================================================
     # PPO Update
     # =========================================================
+    # def update(self):
+    #     T = len(self.rb["dones"])
+    #     if T == 0:
+    #         return {}
+
+    #     N = len(self.env.users)
+    #     B = len(self.env.base_stations)
+    #     global_obs = torch.tensor(np.stack(self.rb["global_obs"], axis=0), dtype=torch.float32, device=self.device)
+    #     dones = self.rb["dones"]
+
+    #     # GAE
+    #     adv, ret_raw = self.compute_gae(
+    #         rewards=self.rb["reward"],
+    #         values_n=self.rb["v_n"],
+    #         next_values_n=self.rb["nv_n"],
+    #         dones=dones
+    #     )
+    #     with torch.no_grad():
+    #         self.vn.update(ret_raw)
+
+    #     ret_n = self.vn.normalize(ret_raw).detach()
+    #     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+    #     adv = adv.detach()
+
+
+    #     # UE tensors
+    #     ue_local_obs = torch.tensor(np.stack(self.rb["local_obs"], axis=0), dtype=torch.float32, device=self.device)
+    #     ue_masks = torch.tensor(np.stack(self.rb["ue_masks"], axis=0), dtype=torch.bool, device=self.device)
+    #     ue_actions = torch.tensor(np.stack(self.rb["ue_actions"], axis=0), dtype=torch.long, device=self.device)
+    #     ue_old_logp = torch.tensor(np.stack(self.rb["ue_logp"], axis=0), dtype=torch.float32, device=self.device)
+
+    #     ue_local_f = ue_local_obs.reshape(T * N, -1)
+    #     ue_masks_f = ue_masks.reshape(T * N, -1)
+    #     ue_actions_f = ue_actions.reshape(T * N)
+    #     ue_old_logp_f = ue_old_logp.reshape(T * N)
+    #     ue_adv_f = adv.repeat_interleave(N)
+
+    #     # BS tensors
+    #     bs_obs = torch.tensor(np.stack(self.rb["bs_obs"], axis=0), dtype=torch.float32, device=self.device)
+    #     bs_masks = torch.tensor(np.stack(self.rb["bs_masks"], axis=0), dtype=torch.bool, device=self.device)
+    #     bs_actions = torch.tensor(np.stack(self.rb["bs_actions"], axis=0), dtype=torch.long, device=self.device)
+    #     bs_old_logp = torch.tensor(np.stack(self.rb["bs_logp"], axis=0), dtype=torch.float32, device=self.device)
+
+    #     bs_obs_f = bs_obs.reshape(T * B, -1)
+    #     bs_masks_f = bs_masks.reshape(T * B, -1)
+    #     bs_actions_f = bs_actions.reshape(T * B)
+    #     bs_old_logp_f = bs_old_logp.reshape(T * B)
+    #     bs_adv_f = adv.repeat_interleave(B)
+
+    #     losses = {
+    #         "critic": 0.0, 
+    #         "actor_ue": 0.0, "actor_bs": 0.0,
+    #         "entropy_ue": 0.0, "entropy_bs": 0.0
+    #     }
+
+    #     for _ in range(self.n_epochs):
+    #         # Critic
+    #         c_epoch, c_cnt = 0.0, 0
+    #         critic_mb = max(32, min(self.minibatch_size, T))
+    #         for mb in self._iter_minibatches(T, critic_mb):
+    #             v_pred_n = self.critic(global_obs[mb])
+    #             loss_v = F.mse_loss(v_pred_n, ret_n[mb])
+
+    #             self.critic_opt.zero_grad()
+    #             (self.value_coef * loss_v).backward()
+    #             nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+    #             self.critic_opt.step()
+
+    #             c_epoch += float(loss_v.item())
+    #             c_cnt += 1
+
+    #         # UE actor
+    #         ue_epoch, ue_ent_epoch, ue_cnt = 0.0, 0.0, 0
+    #         M_ue = T * N
+    #         ue_mb = max(64, min(self.minibatch_size, M_ue))
+    #         for mb in self._iter_minibatches(M_ue, ue_mb):
+    #             logits = self.ue_actor(ue_local_f[mb]).masked_fill(~ue_masks_f[mb], float("-inf"))
+    #             dist = Categorical(logits=logits)
+
+    #             new_logp = dist.log_prob(ue_actions_f[mb])
+    #             entropy = dist.entropy()
+
+    #             ratio = torch.exp(new_logp - ue_old_logp_f[mb])
+    #             surr1 = ratio * ue_adv_f[mb]
+    #             surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * ue_adv_f[mb]
+    #             loss_pi = -torch.min(surr1, surr2).mean()
+    #             loss_ent = -entropy.mean()
+
+    #             self.ue_actor_optim.zero_grad()
+    #             (loss_pi + self.entropy_coef_ue * loss_ent).backward()
+    #             nn.utils.clip_grad_norm_(self.ue_actor.parameters(), self.max_grad_norm)
+    #             self.ue_actor_optim.step()
+
+    #             ue_epoch += float(loss_pi.item())
+    #             ue_ent_epoch += float(loss_ent.item())
+    #             ue_cnt += 1
+
+    #         # BS actor
+    #         bs_epoch, bs_ent_epoch, bs_cnt = 0.0, 0.0, 0
+    #         M_bs = T * B
+    #         bs_mb = max(64, min(self.minibatch_size, M_bs))
+    #         for mb in self._iter_minibatches(M_bs, bs_mb):
+    #             logits = self.bs_actor(bs_obs_f[mb]).masked_fill(~bs_masks_f[mb], float("-inf"))
+    #             dist = Categorical(logits=logits)
+
+    #             new_logp = dist.log_prob(bs_actions_f[mb])
+    #             entropy = dist.entropy()
+
+    #             ratio = torch.exp(new_logp - bs_old_logp_f[mb])
+    #             surr1 = ratio * bs_adv_f[mb]
+    #             surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * bs_adv_f[mb]
+    #             loss_pi = -torch.min(surr1, surr2).mean()
+    #             loss_ent = -entropy.mean()
+
+    #             self.bs_actor_optim.zero_grad()
+    #             (loss_pi + self.entropy_coef_bs * loss_ent).backward()
+    #             nn.utils.clip_grad_norm_(self.bs_actor.parameters(), self.max_grad_norm)
+    #             self.bs_actor_optim.step()
+
+    #             bs_epoch += float(loss_pi.item())
+    #             bs_ent_epoch += float(loss_ent.item())
+    #             bs_cnt += 1
+
+    #         losses["critic"] += c_epoch / max(1, c_cnt)
+    #         losses["actor_ue"] += ue_epoch / max(1, ue_cnt)
+    #         losses["entropy_ue"] += ue_ent_epoch / max(1, ue_cnt)
+    #         losses["actor_bs"] += bs_epoch / max(1, bs_cnt)
+    #         losses["entropy_bs"] += bs_ent_epoch / max(1, bs_cnt)
+
+    #     for k in losses:
+    #         losses[k] /= self.n_epochs
+
+    #     self.reset_rollout()
+    #     return losses
+
     def update(self):
         T = len(self.rb["dones"])
         if T == 0:
@@ -591,19 +726,15 @@ class HAPPOTrainer:
         bs_masks_f = bs_masks.reshape(T * B, -1)
         bs_actions_f = bs_actions.reshape(T * B)
         bs_old_logp_f = bs_old_logp.reshape(T * B)
-
+    
         losses = {
             "critic": 0.0,
             "actor_ue": 0.0,
             "actor_bs": 0.0,
             "entropy_ue": 0.0,
             "entropy_bs": 0.0,
-            "ue_correction_mean": 0.0,
-            "ue_correction_std": 0.0,
-            "ue_correction_min": 0.0,
-            "ue_correction_max": 0.0,
         }
-
+    
         # =========================================================
         # 1. Critic update
         # =========================================================
@@ -624,7 +755,7 @@ class HAPPOTrainer:
                 c_cnt += 1
 
             losses["critic"] += c_epoch / max(c_cnt, 1)
-
+    
         # =========================================================
         # 2. UE actor update
         # =========================================================
@@ -662,30 +793,10 @@ class HAPPOTrainer:
             losses["entropy_ue"] += ue_ent_epoch / max(ue_cnt, 1)
 
         # =========================================================
-        # 3. Advantage for BS update
+        # 3. BS actor update
         # =========================================================
-        with torch.no_grad():
-            updated_ue_logits = self.ue_actor(ue_local_f).masked_fill(~ue_masks_f, float("-inf"))
-            updated_ue_dist = Categorical(logits=updated_ue_logits)
-            updated_ue_logp = updated_ue_dist.log_prob(ue_actions_f).reshape(T, N)
-
-            #per-ue shared policy log likelihood ratio
-            ue_log_ratio_per_user = (updated_ue_logp - ue_old_logp)
-            ue_group_log_ratio = (ue_log_ratio_per_user.sum(dim=1))
-            # ue_group_log_ratio = torch.clamp(ue_group_log_ratio, min=-1.0, max=1.0)
-            ue_correction = torch.exp(ue_group_log_ratio)
-
-            bs_adv_t = (ue_correction * adv).detach()
-            bs_adv_f = bs_adv_t.repeat_interleave(B)
-
-            losses["ue_correction_mean"] = float(ue_correction.mean().item())
-            losses["ue_correction_std"] = float(ue_correction.std(unbiased=False).item())
-            losses["ue_correction_min"] = float(ue_correction.min().item())
-            losses["ue_correction_max"] = float(ue_correction.max().item())
-
-        # =========================================================
-        # 4. BS actor update
-        # =========================================================
+        bs_adv_t = adv.detach()                       # [T]
+        bs_adv_f = bs_adv_t.repeat_interleave(B)     # [T * B]
         M_bs = T * B
         bs_mb = max(64, min(self.minibatch_size, M_bs))
         for _ in range(self.n_epochs):
@@ -717,7 +828,7 @@ class HAPPOTrainer:
 
             losses["actor_bs"] += (bs_epoch / max(bs_cnt, 1))
             losses["entropy_bs"] += (bs_ent_epoch / max(bs_cnt, 1))
-
+    
         # =========================================================
         # Epoch 평균
         # correction 통계는 이미 scalar이므로 나누지 않음
@@ -733,6 +844,7 @@ class HAPPOTrainer:
 
         self.reset_rollout()
         return losses
+    
 
     # =========================================================
     # Train / Eval
@@ -824,11 +936,6 @@ class HAPPOTrainer:
         episode_RemH_last_history = []
         episode_C_E_last_history = []
         episode_C_H_last_history = []
-
-        ue_correction_mean_history = []
-        ue_correction_std_history = []
-        ue_correction_min_history = []
-        ue_correction_max_history = []
 
         global_step = 0
         update_count = 0
@@ -1050,14 +1157,8 @@ class HAPPOTrainer:
                     losses = self.update()
 
                     if losses:
-                        ue_correction_mean_history.append(float(losses["ue_correction_mean"]))
-                        ue_correction_std_history.append(float(losses["ue_correction_std"]))
-                        ue_correction_min_history.append(float(losses["ue_correction_min"]))
-                        ue_correction_max_history.append(float(losses["ue_correction_max"]))
-
                         update_step_history.append(global_step)
                         update_episode_history.append(ep + 1)
-
                         critic_loss_history.append(float(losses["critic"]))
                         actor_ue_loss_history.append(float(losses["actor_ue"]))
                         actor_bs_loss_history.append(float(losses["actor_bs"]))
@@ -1074,12 +1175,7 @@ class HAPPOTrainer:
                             f"BS_Actor:{losses['actor_bs']:.4f} | "
                             f"Critic:{losses['critic']:.4f} | "
                             f"Ent(UE):{losses['entropy_ue']:.4f} | "
-                            f"Ent(BS):{losses['entropy_bs']:.4f} | "
-                            f"Corr:"
-                            f"{losses['ue_correction_mean']:.4f}"
-                            f"±{losses['ue_correction_std']:.4f} | "
-                            f"[{losses['ue_correction_min']:.4f}, "
-                            f"{losses['ue_correction_max']:.4f}]"
+                            f"Ent(BS):{losses['entropy_bs']:.4f}"
                         )
 
                         interval_updates = _checkpoint_interval_updates(global_step)
@@ -1254,9 +1350,12 @@ class HAPPOTrainer:
             "kappa": float(self.env.kappa),
 
             # final-policy evaluation objective
-            "eval_episode_idx_history": eval_episode_idx_history,
-            "eval_objective_mean_history": eval_objective_mean_history,
-            "eval_objective_std_history": eval_objective_std_history,
+            "eval_episode_idx_history":
+                eval_episode_idx_history,
+            "eval_objective_mean_history":
+                eval_objective_mean_history,
+            "eval_objective_std_history":
+                eval_objective_std_history,
 
             # step-wise policy-improvement evaluation
             "policy_eval_step_history": policy_eval_step_history,
@@ -1281,15 +1380,6 @@ class HAPPOTrainer:
             "entropy_bs_history": entropy_bs_history,
 
             "episode_reward_history": episode_reward_history,
-
-            "ue_correction_mean_history":
-                ue_correction_mean_history,
-            "ue_correction_std_history":
-                ue_correction_std_history,
-            "ue_correction_min_history":
-                ue_correction_min_history,
-            "ue_correction_max_history":
-                ue_correction_max_history,
         }
         if self._is_constrained_env():
             results.update({
@@ -1684,11 +1774,6 @@ class HAPPOTrainer:
         entropy_ue = np.asarray(results.get("entropy_ue_history", []), dtype=np.float32)
         entropy_bs = np.asarray(results.get("entropy_bs_history", []), dtype=np.float32)
 
-        ue_correction_mean = np.asarray(results.get("ue_correction_mean_history", []), dtype=np.float32)
-        ue_correction_std = np.asarray(results.get("ue_correction_std_history", []), dtype=np.float32)
-        ue_correction_min = np.asarray(results.get("ue_correction_min_history", []), dtype=np.float32)
-        ue_correction_max = np.asarray(results.get("ue_correction_max_history", []), dtype=np.float32)
-
         # block average for reward plotting
         reward_x_500, global_reward_500 = (
             block_avg_1d(global_reward, 500)
@@ -1828,11 +1913,6 @@ class HAPPOTrainer:
                     actor_bs_loss=actor_bs_loss,
                     entropy_ue=entropy_ue,
                     entropy_bs=entropy_bs,
-
-                    ue_correction_mean=ue_correction_mean,
-                    ue_correction_std=ue_correction_std,
-                    ue_correction_min=ue_correction_min,
-                    ue_correction_max=ue_correction_max
                 )
                 print(f"✅ Saved constrained train npz: {npz_path}")
                 return
@@ -1886,10 +1966,6 @@ class HAPPOTrainer:
                     actor_bs_loss=actor_bs_loss,
                     entropy_ue=entropy_ue,
                     entropy_bs=entropy_bs,
-                    ue_correction_mean=ue_correction_mean,
-                    ue_correction_std=ue_correction_std,
-                    ue_correction_min=ue_correction_min,
-                    ue_correction_max=ue_correction_max,
                 )
                 print(f"✅ Saved train npz: {npz_path}")
                 return
