@@ -23,17 +23,16 @@ EVAL_SEEDS = [2000, 2001, 2002, 2003, 2004]
 
 V = 5.0
 LAMBDA_E = 0.0
-
-# 알고리즘 자체 차이만 먼저 보려면 [0.03] 권장
-# 전체 kappa 비교 시 [0.01, 0.02, 0.03]으로 변경
 KAPPA_LIST = [0.03]
 
 STEPS_PER_EPISODE = 10000
 TRAIN_EPISODES = 10
 UPDATE_INTERVAL = 128
 
-# 이미 학습한 모델만 평가하려면 False
-RUN_TRAIN = True
+OBJECTIVE_WINDOW = 10000
+OBJECTIVE_EPS = 1e-12
+
+RUN_TRAIN = False
 RUN_EVAL = True
 
 SAVE_DIR = "results/results_mappo_happo"
@@ -42,12 +41,13 @@ SAVE_DIR = "results/results_mappo_happo"
 # Environment
 # ============================================================
 def make_env(
-            seed, 
-             V, 
-             lambda_E, 
-             kappa, 
-             use_hard_constraint, 
-             hard_window_len=10000):
+    seed, 
+    V, 
+    lambda_E, 
+    kappa, 
+    use_hard_constraint, 
+    hard_window_len=10000
+):
     set_seed(seed)
 
     area_size = 100
@@ -131,7 +131,96 @@ def safe_mean(value):
     arr = arr[np.isfinite(arr)]
     return float(np.mean(arr)) if arr.size > 0 else np.nan
 
-def extract_eval_metrics(results):
+def build_power_matrix(power_history):
+    if not isinstance(power_history, dict) or len(power_history) == 0:
+        return np.empty((0, 0), dtype=np.float32)
+    rows = []
+    for bs_id in sorted(power_history.keys()):
+        row = np.asarray(power_history[bs_id], dtype=np.float64).reshape(-1)
+        if row.size == 0:
+            return np.empty((0, 0), dtype=np.float64)
+        rows.append(row)
+
+    # 혹시 BS별 저장 길이가 다르면 공통 길이만 사용
+    common_length = min(row.size for row in rows)
+    if common_length <= 0:
+        return np.empty((0, 0), dtype=np.float64)
+
+    return np.stack(
+        [row[-common_length:] for row in rows],
+        axis=0,
+    )
+
+def compute_objective_metric(results, lambda_E, objective_window =10000, eps =1e-12):
+    # --------------------------------------------------------
+    # 1. PF utility
+    # --------------------------------------------------------
+    slot_rates = np.asarray(
+        results.get("slot_rates", []),
+        dtype=np.float64,
+    )
+
+    if slot_rates.ndim == 2 and slot_rates.shape[0] > 0:
+        rate_window = min(
+            int(objective_window),
+            int(slot_rates.shape[0]),
+        )
+        recent_slot_rates = slot_rates[-rate_window:]
+        avg_user_rates = np.mean(recent_slot_rates, axis=0)
+        pf_utility = float(
+            np.sum(
+                np.log(avg_user_rates + float(eps))
+            )
+        )
+    else:
+        avg_user_rates = np.asarray([], dtype=np.float64)
+        pf_utility = np.nan
+
+    # --------------------------------------------------------
+    # 2. Average energy cost
+    # --------------------------------------------------------
+    power_mat = build_power_matrix(
+        results.get("power_history", {})
+    )
+
+    if power_mat.ndim == 2 and power_mat.size > 0:
+        power_window = min(
+            int(objective_window),
+            int(power_mat.shape[1]),
+        )
+        recent_power_mat = power_mat[:, -power_window:]
+        energy_per_slot = np.sum(recent_power_mat, axis=0)
+        avg_energy_cost = float(np.mean(energy_per_slot))
+    else:
+        energy_per_slot = np.asarray([], dtype=np.float64)
+        avg_energy_cost = np.nan
+
+    # --------------------------------------------------------
+    # 3. Energy-aware performance metric
+    # --------------------------------------------------------
+    if np.isfinite(pf_utility) and np.isfinite(avg_energy_cost):
+        performance_metric = float(
+            pf_utility
+            - float(lambda_E) * avg_energy_cost
+        )
+    else:
+        performance_metric = np.nan
+
+    return {
+        "pf_utility": pf_utility,
+        "avg_energy_cost": avg_energy_cost,
+        "performance_metric": performance_metric,
+        "avg_user_rates": avg_user_rates,
+        "energy_per_slot": energy_per_slot,
+    }
+
+def extract_eval_metrics(results, lambda_E, objective_window=10000):
+    objective_metrics = compute_objective_metric(
+        results = results,
+        lambda_E = lambda_E,
+        objective_window = objective_window,
+        eps = OBJECTIVE_EPS
+    )
     return {
         "throughput": safe_mean(
             results.get("episode_throughput_mean", [])
@@ -154,15 +243,9 @@ def extract_eval_metrics(results):
         "reward": safe_mean(
             results.get("episode_reward_mean", [])
         ),
-        "pf_utility": safe_mean(
-            results.get("pf_utility", [])
-        ),
-        "avg_energy_cost": safe_mean(
-            results.get("avg_energy_cost", [])
-        ),
-        "performance_metric": safe_mean(
-            results.get("performance_metric", [])
-        ),
+        "pf_utility": objective_metrics["pf_utility"],
+        "avg_energy_cost": objective_metrics["avg_energy_cost"],
+        "performance_metric": objective_metrics["performance_metric"],
     }
 
 METRIC_NAMES = [
@@ -321,6 +404,8 @@ def train_one_model(algorithm, kappa, train_seed):
     print("=" * 100)
 
     env_soft = make_env(seed=train_seed, V=V, lambda_E=LAMBDA_E, kappa=kappa, use_hard_constraint=False, hard_window_len=STEPS_PER_EPISODE)
+    # Environment 생성 과정에서 RNG가 사용되므로
+    # network initialization 직전에 다시 seed 고정
     set_seed(train_seed)
     trainer = make_trainer(env= env_soft, algorithm=algorithm, eval_env=None)
     trainer.train(
@@ -369,7 +454,13 @@ def evaluate_one_model(algorithm, kappa, train_seed, eval_seed):
         steps_per_episode=STEPS_PER_EPISODE,
         save_npz_path=eval_npz_path
     )
-    metrics = extract_eval_metrics(results)
+    metrics = extract_eval_metrics(results=results, lambda_E=LAMBDA_E, objective_window=OBJECTIVE_WINDOW)
+    print(
+        f"[OBJECTIVE] "
+        f"PF={metrics['pf_utility']:.6f} | "
+        f"AvgEnergy={metrics['avg_energy_cost']:.6f} | "
+        f"Metric={metrics['performance_metric']:.6f}"
+    )
 
     row = {
         "algorithm": algorithm,
@@ -377,8 +468,8 @@ def evaluate_one_model(algorithm, kappa, train_seed, eval_seed):
         "train_seed": int(train_seed),
         "eval_seed": int(eval_seed),
         **metrics,
-        "model_path": model_path,
-        "eval_npz_path": eval_npz_path,
+        # "model_path": model_path,
+        # "eval_npz_path": eval_npz_path,
     }
 
     del trainer
