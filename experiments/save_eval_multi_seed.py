@@ -18,13 +18,14 @@ from env.core import generate_triangle_coverage
 
 from HeLyMARL.utils_happo import set_seed
 from HeLyMARL.env_happo import HAPPOEnvironment
-from HeLyMARL.trainer_mappo import HAPPOTrainer
+from HeLyMARL.trainer_happo import HAPPOTrainer
 
 
 # ============================================================
 # 1. 실험 설정
 # ============================================================
-EVAL_SEEDS = [0, 1, 2, 3, 4]
+TRAIN_SEEDS = [0, 1, 2]
+EVAL_SEEDS = [2000, 2001, 2002, 2003, 2004]
 
 STEPS_PER_EPISODE = 10000
 EVAL_EPISODES = 1
@@ -48,21 +49,29 @@ os.makedirs(SAVE_ROOT, exist_ok=True)
 # ============================================================
 # 2. 학습 모델 경로
 # ============================================================
-MODEL_PATHS = {
-    "PF-HAPPO": (
-        "results/results_baselines/"
-        "ConstrainedHAPPO_pf_model_kappa_0.03_use_dimensionless.pt"
-    ),
-    "Jensen-HAPPO": (
-        "results/results_baselines/"
-        "ConstrainedHAPPO_jensen_model_kappa_0.03_use_dimensionless.pt"
-    ),
-    "HeLyMARL": (
-        "results/results_kappa/"
-        "HeLyMARL_model_kappa_0.03.pt"
-    ),
-}
+def get_model_path(algorithm, train_seed):
+    if algorithm == "PF-HAPPO":
+        return (
+            "results/results_multi_seed/pf/"
+            f"kappa_{KAPPA:.2f}_seed_{train_seed}/model.pt"
+        )
 
+    if algorithm == "Jensen-HAPPO":
+        return (
+            "results/results_multi_seed/jensen/"
+            f"kappa_{KAPPA:.2f}_seed_{train_seed}/model.pt"
+        )
+
+    if algorithm == "HeLyMARL":
+        return (
+            "results/results_mappo_happo/"
+            f"HAPPO_kappa_{KAPPA:.2f}_seed_{train_seed}/"
+            "model.pt"
+        )
+
+    raise ValueError(
+        f"Unknown algorithm: {algorithm}"
+    )
 
 # ============================================================
 # 3. 공통 topology 생성
@@ -73,31 +82,9 @@ def make_network(seed):
     """
     set_seed(seed)
 
-    sbs_positions = generate_triangle_coverage(
-        AREA_SIZE,
-        35,
-    )
-
-    base_stations = [
-        SmallCellBaseStation(
-            i + 1,
-            position,
-            10,
-            35,
-        )
-        for i, position in enumerate(sbs_positions)
-    ]
-
-    users = [
-        UserEquipment(
-            i + 1,
-            (
-                np.random.uniform(10, 90),
-                np.random.uniform(10, 90),
-            ),
-        )
-        for i in range(NUM_USERS)
-    ]
+    sbs_positions = generate_triangle_coverage(AREA_SIZE, 35,)
+    base_stations = [SmallCellBaseStation(i + 1, position, 10, 35,) for i, position in enumerate(sbs_positions)]
+    users = [UserEquipment(i + 1, (np.random.uniform(10, 90), np.random.uniform(10, 90),),) for i in range(NUM_USERS)]
 
     return base_stations, users
 
@@ -148,26 +135,29 @@ def make_helymarl_trainer(env):
 # 5. HeLyMARL seed별 평가
 # ============================================================
 def evaluate_helymarl(
-    seed,
+    train_seed,
+    eval_seed,
     save_npz_path,
 ):
-    model_path = MODEL_PATHS["HeLyMARL"]
+    model_path = get_model_path(
+        "HeLyMARL",
+        train_seed,
+    )
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(
             f"HeLyMARL model not found: {model_path}"
         )
 
-    set_seed(seed)
+    set_seed(eval_seed)
 
-    env = make_helymarl_env(seed)
+    env = make_helymarl_env(eval_seed)
     trainer = make_helymarl_trainer(env)
 
     trainer.load_model(model_path)
 
-    # load_model 과정에서 RNG를 사용하는 경우를 방지하기 위해
-    # 실제 evaluation 직전에 seed를 다시 설정합니다.
-    set_seed(seed)
+    # 모델 로드 과정에서 RNG가 사용될 가능성 방지
+    set_seed(eval_seed)
 
     trainer.evaluate(
         n_episodes=EVAL_EPISODES,
@@ -175,24 +165,15 @@ def evaluate_helymarl(
         save_npz_path=save_npz_path,
     )
 
-
 # ============================================================
 # 6. Constrained HAPPO 평가 adapter
 # ============================================================
 def evaluate_constrained_happo(
     algorithm,
-    seed,
+    train_seed,
+    eval_seed,
     save_npz_path,
 ):
-    """
-    PF-HAPPO와 Jensen-HAPPO의 기존 single-seed 평가 코드를
-    이 함수에 연결합니다.
-
-    algorithm:
-        "PF-HAPPO"
-        "Jensen-HAPPO"
-    """
-
     if algorithm not in [
         "PF-HAPPO",
         "Jensen-HAPPO",
@@ -201,47 +182,32 @@ def evaluate_constrained_happo(
             f"Unknown constrained HAPPO algorithm: {algorithm}"
         )
 
-    model_path = MODEL_PATHS[algorithm]
+    model_path = get_model_path(
+        algorithm,
+        train_seed,
+    )
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(
             f"{algorithm} model not found: {model_path}"
         )
 
-    set_seed(seed)
+    set_seed(eval_seed)
 
-    base_stations, users = make_network(seed)
+    base_stations, users = make_network(
+        eval_seed
+    )
 
-    # ========================================================
-    # 아래 import와 환경 클래스 이름을 현재 프로젝트에 맞게 수정
-    # ========================================================
-    try:
-        from baselines.env_constrainedhappo import (
-            JensenHAPPOEnvironment,
-            PFHAPPOEnvironment,
-        )
-
-        from HeLyMARL.trainer_mappo import (
-            HAPPOTrainer,
-        )
-
-    except ImportError as error:
-        raise ImportError(
-            "\nConstrained HAPPO import 경로를 현재 프로젝트에 "
-            "맞게 수정해야 합니다.\n"
-            "evaluate_constrained_happo() 내부의 import 부분을 "
-            "확인하세요."
-        ) from error
+    from baselines.env_constrainedhappo import (
+        JensenHAPPOEnvironment,
+        PFHAPPOEnvironment,
+    )
 
     if algorithm == "PF-HAPPO":
         env_class = PFHAPPOEnvironment
     else:
         env_class = JensenHAPPOEnvironment
 
-    # ========================================================
-    # 기존 PF/Jensen single-seed 평가 환경 생성 코드와
-    # 동일하게 맞추면 됩니다.
-    # ========================================================
     env = env_class(
         base_stations=base_stations,
         users=users,
@@ -253,7 +219,9 @@ def evaluate_constrained_happo(
         hard_window_len=STEPS_PER_EPISODE,
         use_hard_constraint=True,
         kappa=KAPPA,
-        use_dimensionless=True,
+
+        # 학습할 때 false를 썼다면 평가도 동일하게 맞춰야 함
+        use_dimensionless=False,
     )
 
     trainer = HAPPOTrainer(
@@ -273,14 +241,13 @@ def evaluate_constrained_happo(
 
     trainer.load_model(model_path)
 
-    set_seed(seed)
+    set_seed(eval_seed)
 
     trainer.evaluate(
         n_episodes=EVAL_EPISODES,
         steps_per_episode=STEPS_PER_EPISODE,
         save_npz_path=save_npz_path,
     )
-
 
 # ============================================================
 # 7. DDPP 평가 adapter
@@ -357,18 +324,19 @@ def evaluate_maxsnr(
 # ============================================================
 def run_single_evaluation(
     algorithm,
-    seed,
+    train_seed,
+    eval_seed,
     save_npz_path,
 ):
     if algorithm == "DDPP":
         evaluate_ddpp(
-            seed=seed,
+            seed=eval_seed,
             save_npz_path=save_npz_path,
         )
 
     elif algorithm == "MaxSNR":
         evaluate_maxsnr(
-            seed=seed,
+            seed=eval_seed,
             save_npz_path=save_npz_path,
         )
 
@@ -378,13 +346,15 @@ def run_single_evaluation(
     ]:
         evaluate_constrained_happo(
             algorithm=algorithm,
-            seed=seed,
+            train_seed=train_seed,
+            eval_seed=eval_seed,
             save_npz_path=save_npz_path,
         )
 
     elif algorithm == "HeLyMARL":
         evaluate_helymarl(
-            seed=seed,
+            train_seed=train_seed,
+            eval_seed=eval_seed,
             save_npz_path=save_npz_path,
         )
 
@@ -392,7 +362,6 @@ def run_single_evaluation(
         raise ValueError(
             f"Unknown algorithm: {algorithm}"
         )
-
 
 # ============================================================
 # 10. power_mat에서 BS ON/OFF matrix 추출
@@ -745,6 +714,386 @@ def load_handover_trajectory(npz_path):
             f"Handover-related keys: {handover_keys}\n"
             f"Available keys: {data.files}"
         )
+def save_train_eval_summary(
+    algorithm,
+    train_seed_results,
+):
+    train_seeds = []
+    throughput_per_train_seed = []
+    fairness_per_train_seed = []
+    on_ratio_trajectory_per_train_seed = []
+    handover_trajectory_per_train_seed = []
+
+    all_eval_paths = []
+
+    for train_seed in sorted(
+        train_seed_results.keys()
+    ):
+        result = train_seed_results[
+            train_seed
+        ]
+
+        train_seeds.append(
+            train_seed
+        )
+
+        throughput_per_train_seed.append(
+            result["throughput"]
+        )
+
+        fairness_per_train_seed.append(
+            result["fairness"]
+        )
+
+        on_ratio_trajectory_per_train_seed.append(
+            result["on_ratio_trajectory"]
+        )
+
+        handover_trajectory_per_train_seed.append(
+            result["handover_trajectory"]
+        )
+
+        all_eval_paths.extend(
+            result["eval_paths"]
+        )
+
+    throughput_per_train_seed = np.asarray(
+        throughput_per_train_seed,
+        dtype=float,
+    )
+
+    fairness_per_train_seed = np.asarray(
+        fairness_per_train_seed,
+        dtype=float,
+    )
+
+    min_time_length = min(
+        len(trajectory)
+        for trajectory
+        in on_ratio_trajectory_per_train_seed
+    )
+
+    on_ratio_trajectory_per_train_seed = np.stack(
+        [
+            trajectory[:min_time_length]
+            for trajectory
+            in on_ratio_trajectory_per_train_seed
+        ],
+        axis=0,
+    ).astype(np.float32)
+
+    trajectory_ddof = (
+        1
+        if on_ratio_trajectory_per_train_seed.shape[0] > 1
+        else 0
+    )
+
+    on_ratio_trajectory_mean = np.mean(
+        on_ratio_trajectory_per_train_seed,
+        axis=0,
+    ).astype(np.float32)
+
+    on_ratio_trajectory_var = np.var(
+        on_ratio_trajectory_per_train_seed,
+        axis=0,
+        ddof=trajectory_ddof,
+    ).astype(np.float32)
+
+    on_ratio_trajectory_std = np.std(
+        on_ratio_trajectory_per_train_seed,
+        axis=0,
+        ddof=trajectory_ddof,
+    ).astype(np.float32)
+
+    overall_on_ratio_per_train_seed = np.mean(
+        on_ratio_trajectory_per_train_seed,
+        axis=1,
+    ).astype(np.float32)
+
+    overall_on_ratio_mean = float(
+        np.mean(
+            overall_on_ratio_per_train_seed
+        )
+    )
+
+    overall_on_ratio_var = float(
+        np.var(
+            overall_on_ratio_per_train_seed,
+            ddof=trajectory_ddof,
+        )
+    )
+
+    overall_on_ratio_std = float(
+        np.std(
+            overall_on_ratio_per_train_seed,
+            ddof=trajectory_ddof,
+        )
+    )
+    # ============================================================
+    # Handover trajectory: train seed별 eval 평균 trajectory
+    # ============================================================
+    min_handover_length = min(
+        len(trajectory)
+        for trajectory in handover_trajectory_per_train_seed
+    )
+
+    handover_trajectory_per_train_seed = np.stack(
+        [
+            trajectory[:min_handover_length]
+            for trajectory in handover_trajectory_per_train_seed
+        ],
+        axis=0,
+    ).astype(np.float32)
+    # [N_train, T]
+
+    handover_ddof = (
+        1
+        if handover_trajectory_per_train_seed.shape[0] > 1
+        else 0
+    )
+
+    handover_trajectory_mean = np.mean(
+        handover_trajectory_per_train_seed,
+        axis=0,
+    ).astype(np.float32)
+
+    handover_trajectory_var = np.var(
+        handover_trajectory_per_train_seed,
+        axis=0,
+        ddof=handover_ddof,
+    ).astype(np.float32)
+
+    handover_trajectory_std = np.std(
+        handover_trajectory_per_train_seed,
+        axis=0,
+        ddof=handover_ddof,
+    ).astype(np.float32)
+
+    overall_handover_ratio_per_train_seed = (
+        handover_trajectory_per_train_seed[:, -1]
+    ).astype(np.float32)
+
+    overall_handover_ratio_mean = float(
+        np.mean(overall_handover_ratio_per_train_seed)
+    )
+
+    overall_handover_ratio_var = float(
+        np.var(
+            overall_handover_ratio_per_train_seed,
+            ddof=handover_ddof,
+        )
+    )
+
+    overall_handover_ratio_std = float(
+        np.std(
+            overall_handover_ratio_per_train_seed,
+            ddof=handover_ddof,
+        )
+    )
+
+    (
+        throughput_mean,
+        throughput_var,
+        throughput_std,
+    ) = calculate_seed_statistics(
+        throughput_per_train_seed
+    )
+
+    (
+        fairness_mean,
+        fairness_var,
+        fairness_std,
+    ) = calculate_seed_statistics(
+        fairness_per_train_seed
+    )
+
+    safe_algorithm_name = (
+        algorithm
+        .replace("-", "_")
+        .replace(" ", "_")
+        .lower()
+    )
+
+    summary_path = os.path.join(
+        SAVE_ROOT,
+        (
+            f"{safe_algorithm_name}_"
+            f"{len(train_seeds)}train_"
+            f"{len(EVAL_SEEDS)}eval_"
+            "summary.npz"
+        ),
+    )
+
+    np.savez(
+        summary_path,
+
+        algorithm=np.asarray(
+            algorithm
+        ),
+
+        train_seeds=np.asarray(
+            train_seeds,
+            dtype=int,
+        ),
+
+        eval_seeds=np.asarray(
+            EVAL_SEEDS,
+            dtype=int,
+        ),
+
+        eval_paths=np.asarray(
+            all_eval_paths,
+            dtype=str,
+        ),
+
+        steps_per_episode=np.asarray(
+            min_time_length,
+            dtype=int,
+        ),
+
+        on_ratio_trajectory_per_train_seed=(
+            on_ratio_trajectory_per_train_seed
+        ),
+
+        # plot 코드 호환용
+        on_ratio_trajectory_per_seed=(
+            on_ratio_trajectory_per_train_seed
+        ),
+
+        on_ratio_trajectory_mean=(
+            on_ratio_trajectory_mean
+        ),
+
+        on_ratio_trajectory_var=(
+            on_ratio_trajectory_var
+        ),
+
+        on_ratio_trajectory_std=(
+            on_ratio_trajectory_std
+        ),
+
+        overall_on_ratio_per_train_seed=(
+            overall_on_ratio_per_train_seed
+        ),
+
+        overall_on_ratio_mean=np.asarray(
+            overall_on_ratio_mean,
+            dtype=float,
+        ),
+
+        overall_on_ratio_var=np.asarray(
+            overall_on_ratio_var,
+            dtype=float,
+        ),
+
+        overall_on_ratio_std=np.asarray(
+            overall_on_ratio_std,
+            dtype=float,
+        ),
+
+        throughput_per_train_seed=(
+            throughput_per_train_seed
+        ),
+
+        throughput_mean=np.asarray(
+            throughput_mean,
+            dtype=float,
+        ),
+
+        throughput_var=np.asarray(
+            throughput_var,
+            dtype=float,
+        ),
+
+        throughput_std=np.asarray(
+            throughput_std,
+            dtype=float,
+        ),
+
+        fairness_per_train_seed=(
+            fairness_per_train_seed
+        ),
+
+        fairness_mean=np.asarray(
+            fairness_mean,
+            dtype=float,
+        ),
+
+        fairness_var=np.asarray(
+            fairness_var,
+            dtype=float,
+        ),
+
+        fairness_std=np.asarray(
+            fairness_std,
+            dtype=float,
+        ),
+
+        handover_ratio_trajectory_per_train_seed=(
+            handover_trajectory_per_train_seed
+        ),
+
+        # 기존 plot 코드 호환용
+        handover_ratio_trajectory_per_seed=(
+            handover_trajectory_per_train_seed
+        ),
+
+        handover_ratio_trajectory_mean=(
+            handover_trajectory_mean
+        ),
+
+        handover_ratio_trajectory_var=(
+            handover_trajectory_var
+        ),
+
+        handover_ratio_trajectory_std=(
+            handover_trajectory_std
+        ),
+
+        overall_handover_ratio_per_train_seed=(
+            overall_handover_ratio_per_train_seed
+        ),
+
+        overall_handover_ratio_mean=np.asarray(
+            overall_handover_ratio_mean,
+            dtype=float,
+        ),
+
+        overall_handover_ratio_var=np.asarray(
+            overall_handover_ratio_var,
+            dtype=float,
+        ),
+
+        overall_handover_ratio_std=np.asarray(
+            overall_handover_ratio_std,
+            dtype=float,
+        ),
+    )
+
+    print(
+        f"\n[{algorithm}] final summary saved:"
+        f"\n{summary_path}"
+    )
+
+    print(
+        f"Throughput="
+        f"{throughput_mean:.4f} "
+        f"+/- {throughput_std:.4f}"
+    )
+
+    print(
+        f"Block JFI="
+        f"{fairness_mean:.4f} "
+        f"+/- {fairness_std:.4f}"
+    )
+
+    print(
+        f"Overall ON ratio="
+        f"{overall_on_ratio_mean:.4f} "
+        f"+/- {overall_on_ratio_std:.4f}"
+    )
+
+    return summary_path
 
 def to_finite_mean(values):
     values = np.asarray(
@@ -1463,9 +1812,6 @@ def save_algorithm_summary(
     return summary_path
 
 
-# ============================================================
-# 12. Main
-# ============================================================
 if __name__ == "__main__":
 
     algorithms = [
@@ -1475,6 +1821,16 @@ if __name__ == "__main__":
         "Jensen-HAPPO",
         "HeLyMARL",
     ]
+    model_based_algorithms = {
+        "PF-HAPPO",
+        "Jensen-HAPPO",
+        "HeLyMARL",
+    }
+
+    non_training_baselines = {
+        "DDPP",
+        "MaxSNR",
+    }
 
     all_summary_paths = {}
 
@@ -1491,115 +1847,348 @@ if __name__ == "__main__":
             .lower()
         )
 
-        algorithm_save_dir = os.path.join(
-            SAVE_ROOT,
-            safe_algorithm_name,
-        )
-
-        os.makedirs(
-            algorithm_save_dir,
-            exist_ok=True,
-        )
-
-        eval_paths = []
-        completed_seeds = []
-
-        for seed in EVAL_SEEDS:
-            eval_npz_path = os.path.join(
-                algorithm_save_dir,
-                (
-                    f"{safe_algorithm_name}_"
-                    f"eval_seed_{seed}.npz"
-                ),
+        # ====================================================
+        # A. 학습 모델이 없는 baseline
+        #    DDPP와 MaxSNR은 train seed가 없으므로
+        #    EVAL_SEEDS에 대해서만 각각 한 번씩 평가한다.
+        # ====================================================
+        if algorithm in non_training_baselines:
+            eval_dir = os.path.join(
+                SAVE_ROOT,
+                "evaluations",
+                safe_algorithm_name,
+                f"kappa_{KAPPA:.2f}",
             )
+            os.makedirs(eval_dir, exist_ok=True)
 
-            # =================================================
-            # 1. Seed별 evaluation 실행
-            # =================================================
-            should_run = (
-                OVERWRITE_EXISTING
-                or not os.path.exists(eval_npz_path)
-            )
+            eval_paths = []
+            successful_eval_seeds = []
 
-            if should_run:
-                print(
-                    f"\n[RUN] {algorithm}, seed={seed}"
-                )
-                print(
-                    f"Save path: {eval_npz_path}"
+            for eval_seed in EVAL_SEEDS:
+                eval_npz_path = os.path.join(
+                    eval_dir,
+                    f"eval_seed_{eval_seed}.npz",
                 )
 
-                try:
-                    run_single_evaluation(
-                        algorithm=algorithm,
-                        seed=seed,
-                        save_npz_path=eval_npz_path,
+                should_run = (
+                    OVERWRITE_EXISTING
+                    or not os.path.exists(eval_npz_path)
+                )
+
+                if should_run:
+                    print(
+                        f"\n[RUN] {algorithm} | "
+                        f"eval_seed={eval_seed}"
                     )
 
-                except Exception as error:
+                    try:
+                        run_single_evaluation(
+                            algorithm=algorithm,
+                            train_seed=None,
+                            eval_seed=eval_seed,
+                            save_npz_path=eval_npz_path,
+                        )
+                    except Exception as error:
+                        print(
+                            f"[ERROR] {algorithm}, "
+                            f"eval_seed={eval_seed}: "
+                            f"{type(error).__name__}: {error}"
+                        )
+                        continue
+                else:
                     print(
-                        f"[ERROR] {algorithm}, seed={seed}: "
-                        f"{type(error).__name__}: {error}"
+                        f"[SKIP] Existing result: "
+                        f"{eval_npz_path}"
+                    )
+
+                if not os.path.exists(eval_npz_path):
+                    print(
+                        f"[WARNING] Result not saved: "
+                        f"{eval_npz_path}"
                     )
                     continue
 
-            else:
+                try:
+                    throughput, fairness = load_eval_performance(
+                        eval_npz_path
+                    )
+                    bs_on_mat = load_bs_on_matrix(
+                        eval_npz_path
+                    )
+                    handover_trajectory = load_handover_trajectory(
+                        eval_npz_path
+                    )
+
+                    mean_on_ratio = float(
+                        np.mean(
+                            np.mean(bs_on_mat, axis=0)
+                        )
+                    )
+                    final_ho_ratio = float(
+                        handover_trajectory[
+                            min(
+                                len(handover_trajectory),
+                                STEPS_PER_EPISODE,
+                            ) - 1
+                        ]
+                    )
+                except Exception as error:
+                    print(
+                        f"[WARNING] Failed to validate "
+                        f"{eval_npz_path}: {error}"
+                    )
+                    continue
+
+                eval_paths.append(eval_npz_path)
+                successful_eval_seeds.append(eval_seed)
+
                 print(
-                    f"[SKIP] Existing result: "
-                    f"{algorithm}, seed={seed}"
+                    f"[RESULT] eval_seed={eval_seed} | "
+                    f"Throughput={throughput:.6f} | "
+                    f"Block-JFI={fairness:.6f} | "
+                    f"ON={mean_on_ratio:.6f} | "
+                    f"Final-HO={final_ho_ratio:.6f}"
                 )
 
-            # =================================================
-            # 2. 결과 파일 생성 여부 확인
-            # =================================================
-            if not os.path.exists(eval_npz_path):
+            if not eval_paths:
                 print(
-                    f"[WARNING] Evaluation result was not saved: "
-                    f"{eval_npz_path}"
+                    f"[WARNING] No valid evaluation results "
+                    f"for {algorithm}"
                 )
                 continue
 
+            summary_path = save_algorithm_summary(
+                algorithm=algorithm,
+                eval_paths=eval_paths,
+                seeds=successful_eval_seeds,
+            )
+
+            all_summary_paths[algorithm] = summary_path
+            continue
+
+        # ====================================================
+        # B. 학습 모델이 있는 알고리즘
+        #    train seed별 모델을 eval seed 집합에서 평가한 뒤,
+        #    각 train seed 내부에서 eval 평균을 계산하고
+        #    마지막으로 train seed 간 통계를 저장한다.
+        # ====================================================
+        if algorithm not in model_based_algorithms:
+            raise ValueError(
+                f"Unsupported algorithm: {algorithm}"
+            )
+
+        train_seed_results = {}
+
+        for train_seed in TRAIN_SEEDS:
+            model_path = get_model_path(
+                algorithm,
+                train_seed,
+            )
+
             print(
-                f"[LOAD] {algorithm}, seed={seed}: "
-                f"{eval_npz_path}"
+                f"\n[MODEL] algorithm={algorithm}, "
+                f"train_seed={train_seed}"
+            )
+            print(f"Path: {model_path}")
+
+            if not os.path.exists(model_path):
+                print(
+                    f"[WARNING] Missing model: "
+                    f"{model_path}"
+                )
+                continue
+
+            train_eval_dir = os.path.join(
+                SAVE_ROOT,
+                "evaluations",
+                safe_algorithm_name,
+                f"kappa_{KAPPA:.2f}_seed_{train_seed}",
+            )
+            os.makedirs(train_eval_dir, exist_ok=True)
+
+            eval_paths = []
+            eval_throughputs = []
+            eval_fairnesses = []
+            eval_on_trajectories = []
+            eval_handover_trajectories = []
+
+            for eval_seed in EVAL_SEEDS:
+                eval_npz_path = os.path.join(
+                    train_eval_dir,
+                    f"eval_seed_{eval_seed}.npz",
+                )
+
+                should_run = (
+                    OVERWRITE_EXISTING
+                    or not os.path.exists(eval_npz_path)
+                )
+
+                if should_run:
+                    print(
+                        f"\n[RUN] {algorithm} | "
+                        f"train_seed={train_seed} | "
+                        f"eval_seed={eval_seed}"
+                    )
+
+                    try:
+                        run_single_evaluation(
+                            algorithm=algorithm,
+                            train_seed=train_seed,
+                            eval_seed=eval_seed,
+                            save_npz_path=eval_npz_path,
+                        )
+                    except Exception as error:
+                        print(
+                            f"[ERROR] {algorithm}, "
+                            f"train_seed={train_seed}, "
+                            f"eval_seed={eval_seed}: "
+                            f"{type(error).__name__}: {error}"
+                        )
+                        continue
+                else:
+                    print(
+                        f"[SKIP] Existing result: "
+                        f"{eval_npz_path}"
+                    )
+
+                if not os.path.exists(eval_npz_path):
+                    print(
+                        f"[WARNING] Result not saved: "
+                        f"{eval_npz_path}"
+                    )
+                    continue
+
+                try:
+                    throughput, fairness = load_eval_performance(
+                        eval_npz_path
+                    )
+
+                    bs_on_mat = load_bs_on_matrix(
+                        eval_npz_path
+                    )
+
+                    # [B, T] -> slot별 BS ON 비율 [T]
+                    on_ratio_trajectory = np.mean(
+                        bs_on_mat,
+                        axis=0,
+                    )[:STEPS_PER_EPISODE]
+
+                    handover_trajectory = load_handover_trajectory(
+                        eval_npz_path
+                    )[:STEPS_PER_EPISODE]
+
+                except Exception as error:
+                    print(
+                        f"[WARNING] Failed to load "
+                        f"{eval_npz_path}: {error}"
+                    )
+                    continue
+
+                eval_paths.append(eval_npz_path)
+                eval_throughputs.append(throughput)
+                eval_fairnesses.append(fairness)
+                eval_on_trajectories.append(
+                    on_ratio_trajectory
+                )
+                eval_handover_trajectories.append(
+                    handover_trajectory
+                )
+
+                print(
+                    f"[RESULT] train_seed={train_seed}, "
+                    f"eval_seed={eval_seed} | "
+                    f"Throughput={throughput:.6f} | "
+                    f"Block-JFI={fairness:.6f}"
+                )
+
+            if not eval_paths:
+                print(
+                    f"[WARNING] No successful evaluations "
+                    f"for train seed {train_seed}"
+                )
+                continue
+
+            train_throughput_mean = to_finite_mean(
+                eval_throughputs
+            )
+            train_fairness_mean = to_finite_mean(
+                eval_fairnesses
             )
 
-            eval_paths.append(
-                eval_npz_path
+            min_eval_length = min(
+                len(trajectory)
+                for trajectory in eval_on_trajectories
             )
 
-            completed_seeds.append(
-                seed
+            eval_on_trajectory_mat = np.stack(
+                [
+                    trajectory[:min_eval_length]
+                    for trajectory in eval_on_trajectories
+                ],
+                axis=0,
             )
 
-        # =====================================================
-        # 3. Algorithm별 multi-seed summary 생성
-        # =====================================================
-        if not eval_paths:
+            train_on_ratio_trajectory = np.mean(
+                eval_on_trajectory_mat,
+                axis=0,
+            )
+            min_ho_length = min(
+                len(trajectory)
+                for trajectory in eval_handover_trajectories
+            )
+
+            eval_handover_trajectory_mat = np.stack(
+                [
+                    trajectory[:min_ho_length]
+                    for trajectory in eval_handover_trajectories
+                ],
+                axis=0,
+            )
+            # [5 eval seeds, T]
+
+            train_handover_trajectory = np.mean(
+                eval_handover_trajectory_mat,
+                axis=0,
+            )
+
+            train_seed_results[train_seed] = {
+                "eval_paths": eval_paths,
+                "throughput": train_throughput_mean,
+                "fairness": train_fairness_mean,
+                "on_ratio_trajectory": (
+                    train_on_ratio_trajectory
+                ),
+                "handover_trajectory": train_handover_trajectory,
+            }
+
             print(
-                f"[WARNING] No successful results "
+                f"\n[TRAIN SEED SUMMARY] "
+                f"{algorithm} | "
+                f"train_seed={train_seed} | "
+                f"Throughput={train_throughput_mean:.6f} | "
+                f"Block-JFI={train_fairness_mean:.6f}"
+            )
+
+        if not train_seed_results:
+            print(
+                f"[WARNING] No valid train-seed results "
                 f"for {algorithm}"
             )
             continue
 
-        summary_path = save_algorithm_summary(
+        summary_path = save_train_eval_summary(
             algorithm=algorithm,
-            eval_paths=eval_paths,
-            seeds=completed_seeds,
+            train_seed_results=train_seed_results,
         )
 
-        all_summary_paths[algorithm] = (
-            summary_path
-        )
+        all_summary_paths[algorithm] = summary_path
 
     print("\n")
     print("=" * 100)
-    print("Completed multi-seed evaluations")
+    print("Completed all multi-seed evaluations")
     print("=" * 100)
 
-    for algorithm, summary_path in (
-        all_summary_paths.items()
-    ):
+    for algorithm, summary_path in all_summary_paths.items():
         print(
             f"{algorithm:<16}: {summary_path}"
         )

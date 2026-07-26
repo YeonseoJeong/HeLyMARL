@@ -11,48 +11,47 @@ import matplotlib.pyplot as plt
 MULTI_SEED_FILES = {
     "DDPP": (
         "results/results_multi_seed/"
-        "ddpp_5seeds_on_ratio.npz"
+        "ddpp_5seeds_evaluation_summary.npz"
     ),
     "MaxSNR": (
         "results/results_multi_seed/"
-        "maxsnr_5seeds_on_ratio.npz"
+        "maxsnr_5seeds_evaluation_summary.npz"
     ),
     "PF-HAPPO": (
         "results/results_multi_seed/"
-        "pf_happo_5seeds_on_ratio.npz"
+        "pf_happo_3train_5eval_summary.npz"
     ),
     "Jensen-HAPPO": (
         "results/results_multi_seed/"
-        "jensen_happo_5seeds_on_ratio.npz"
+        "jensen_happo_3train_5eval_summary.npz"
     ),
     "HeLyMARL": (
         "results/results_multi_seed/"
-        "helymarl_5seeds_on_ratio.npz"
+        "helymarl_3train_5eval_summary.npz"
     ),
 }
-
 
 # Objective 계산용 기존 single-seed 파일
 NPZ_FILES = {
     "DDPP": (
-        "results/results_compare/"
+        "results/results_baselines/ddpp/"
         "DDPP_eval_lambda_0.0.npz"
     ),
     "MaxSNR": (
-        "results/results_compare/"
+        "results/results_baselines/maxsnr/"
         "MaxSNR_eval_lambda_0.0.npz"
     ),
     "PF-HAPPO": (
-        "results/results_baselines/"
+        "results/results_baselines/pf/"
         "ConstrainedHAPPO_pf_eval_hard_kappa_0.03_use_dimensionless.npz"
     ),
     "Jensen-HAPPO": (
-        "results/results_baselines/"
+        "results/results_baselines/jensen/"
         "ConstrainedHAPPO_jensen_eval_hard_kappa_0.03_use_dimensionless.npz"
     ),
     "HeLyMARL": (
-        "results/results_kappa/"
-        "HeLyMARL_eval_hard_kappa_0.03.npz"
+        "results/results_mappo_happo/HAPPO_kappa_0.03_seed_0/"
+        "eval_seed_2000.npz"
     ),
 }
 

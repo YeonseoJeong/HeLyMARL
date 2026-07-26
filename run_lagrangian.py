@@ -6,7 +6,7 @@ from env.user_equipment import UserEquipment
 from env.core import generate_triangle_coverage
 
 from HeLyMARL.utils_happo import set_seed
-from HeLyMARL.trainer_mappo import MAPPOTrainer
+from HeLyMARL.trainer_happo import HAPPOTrainer
 from baselines.env_constrainedhappo import JensenHAPPOEnvironment, PFHAPPOEnvironment
 
 def make_env(
@@ -81,7 +81,7 @@ def make_env(
 
 
 def make_trainer(env, eval_env = None):
-    return MAPPOTrainer(
+    return HAPPOTrainer(
         env=env,
         eval_env = eval_env,
         lr_actor_ue=3e-4,
@@ -126,11 +126,11 @@ def save_dual_history(env, save_path):
 
 
 if __name__ == "__main__":
-    seed = 0
-    checkpoint_eval_seeds = [1000,1001,1002,1003,1004]
-    final_eval_seed = 2000
+    train_seeds = [0, 1, 2, 3, 4]
+    checkpoint_eval_seeds = [2000, 2001, 2002, 2003, 2004]
+    # final_eval_seed = 2000
 
-    variants = ["pf"]
+    variants = ["jensen"]
     kappa_list = [0.03]
     lambda_E = 0.0
     # pf_gamma = 0.5
@@ -145,84 +145,80 @@ if __name__ == "__main__":
     mu_max = 100.0
     nu_max = 100.0
 
-    save_dir = "results/policy_improvement"
+    save_dir = "results/results_multi_seed"
     os.makedirs(save_dir, exist_ok=True)
 
     for variant in variants:
         for kappa in kappa_list:
-            variant_dir = f"{save_dir}/{variant}"
-            os.makedirs(variant_dir, exist_ok=True)
-            print(f"\n=== Training Constrained HAPPO-{variant.upper()} | kappa = {kappa} ===")
+            for seed in train_seeds:
+                run_dir = os.path.join(
+                    save_dir,
+                    variant,
+                    f"kappa_{kappa:.2f}_seed_{seed}",
+                )
 
-            env_soft = make_env(
-                seed=seed,
-                variant=variant,
-                lambda_E=lambda_E,
-                kappa=kappa,
-                use_hard_constraint=False,
-                hard_window_len=steps_per_episode,
-                eta_mu=eta_mu,
-                eta_nu=eta_nu,
-                mu_max=mu_max,
-                nu_max=nu_max,
-                use_dimensionless=False,
-                # pf_gamma=pf_gamma,
-            )
+                os.makedirs(
+                    run_dir,
+                    exist_ok=True,
+                )
+                print(
+                        f"\n=== Training Constrained "
+                        f"HAPPO-{variant.upper()} | "
+                        f"train seed={seed} | "
+                        f"kappa={kappa:.2f} ==="
+                )
 
-            # 각 training episode 종료 후
-            # 최종 정책 하나를 평가할 별도 hard 환경
-            env_checkpoint_eval = make_env(
-                seed=checkpoint_eval_seeds[0],
-                variant=variant,
-                lambda_E=lambda_E,
-                kappa=kappa,
-                use_hard_constraint=True,
-                hard_window_len=steps_per_episode,
-                eta_mu=eta_mu,
-                eta_nu=eta_nu,
-                mu_max=mu_max,
-                nu_max=nu_max,
-                use_dimensionless=False,
-                # pf_gamma=pf_gamma,
-            )
-            set_seed(seed)
-            trainer_soft = make_trainer(env_soft, eval_env=env_checkpoint_eval)
+                env_soft = make_env(
+                    seed=seed,
+                    variant=variant,
+                    lambda_E=lambda_E,
+                    kappa=kappa,
+                    use_hard_constraint=False,
+                    hard_window_len=steps_per_episode,
+                    eta_mu=eta_mu,
+                    eta_nu=eta_nu,
+                    mu_max=mu_max,
+                    nu_max=nu_max,
+                    use_dimensionless=False,
+                    # pf_gamma=pf_gamma,
+                )
+                set_seed(seed)
+                trainer_soft = make_trainer(env_soft)
 
-            # gamma_tag = f"gamma_{pf_gamma}"
-            train_npz_path = (
-                f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_policy_improvement_eval5seeds_kappa_{kappa}.npz"
-            )
+                # gamma_tag = f"gamma_{pf_gamma}"
+                train_npz_path = os.path.join(run_dir, "train.npz")
+                model_path = os.path.join(run_dir, "model.pt")
+                dual_npz_path = os.path.join(run_dir, "dual_history.npz")
 
-            model_path = (
-                f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_final_model_eval5seeds_kappa_{kappa}.pt"
-            )
+                trainer_soft.train(
+                    n_episodes=train_episodes,
+                    steps_per_episode=steps_per_episode,
+                    update_interval=update_interval,
+                    save_npz_path=train_npz_path,
+                    eval_every=0,
+                )
 
-            dual_npz_path = (
-                f"{save_dir}/{variant}/ConstrainedHAPPO_{variant}_dual_history_eval5seeds_kappa_{kappa}.npz"
-            )
-            
-            trainer_soft.train(
-                n_episodes=train_episodes,
-                steps_per_episode=steps_per_episode,
-                update_interval=update_interval,
-                save_npz_path=train_npz_path,
-                eval_every=0,
-                eval_n_episodes=len(checkpoint_eval_seeds),
-                eval_steps_per_episode=steps_per_episode,
-                eval_seeds=checkpoint_eval_seeds,
-                eval_deterministic=False,
-                policy_improvement_dir=f"{variant_dir}/checkpoints",
-                checkpoint_every_updates_early=8,
-                checkpoint_every_updates_mid=40,
-                checkpoint_every_updates_late=80,
-                checkpoint_early_until_step=10000,
-                checkpoint_mid_until_step=50000,
-                save_episode_end_checkpoint=True,
-            )
+                
+                trainer_soft.save_model(model_path)
 
-            trainer_soft.save_model(model_path)
+                save_dual_history(env_soft, dual_npz_path)
+                                
 
-            save_dual_history(env_soft, dual_npz_path)
+                # env_checkpoint_eval = make_env(
+                #     seed=checkpoint_eval_seeds[0],
+                #     variant=variant,
+                #     lambda_E=lambda_E,
+                #     kappa=kappa,
+                #     use_hard_constraint=True,
+                #     hard_window_len=steps_per_episode,
+                #     eta_mu=eta_mu,
+                #     eta_nu=eta_nu,
+                #     mu_max=mu_max,
+                #     nu_max=nu_max,
+                #     use_dimensionless=False,
+                #     # pf_gamma=pf_gamma,
+                # )  
+
 
             # print(f"\n=== Hard Eval Constrained HAPPO-{variant.upper()} | kappa = {kappa} ===")
 

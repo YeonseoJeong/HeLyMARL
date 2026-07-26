@@ -14,15 +14,15 @@ NPZ_FILES = {
     ),
     "PF-HAPPO": (
         "results/results_multi_seed/"
-        "pf_happo_5seeds_evaluation_summary.npz"
+        "pf_happo_3train_5eval_summary.npz"
     ),
     "Jensen-HAPPO": (
         "results/results_multi_seed/"
-        "jensen_happo_5seeds_evaluation_summary.npz"
+        "jensen_happo_3train_5eval_summary.npz"
     ),
     "HeLyMARL": (
         "results/results_multi_seed/"
-        "helymarl_5seeds_evaluation_summary.npz"
+        "helymarl_3train_5eval_summary.npz"
     ),
 }
 
@@ -42,7 +42,7 @@ SMOOTH_WINDOW = 1
 
 # 평균 ± BAND_SCALE × 표준편차
 BAND_SCALE = 1.0
-BAND_ALPHA = 0.20
+BAND_ALPHA = 0.10
 
 
 # ============================================================

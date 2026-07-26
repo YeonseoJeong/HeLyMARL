@@ -9,23 +9,23 @@ import matplotlib.pyplot as plt
 NPZ_FILES = {
     "DDPP": (
         "results/results_multi_seed/"
-        "ddpp_5seeds_on_ratio.npz"
+        "ddpp_5seeds_evaluation_summary.npz"
     ),
     "MaxSNR": (
         "results/results_multi_seed/"
-        "maxsnr_5seeds_on_ratio.npz"
+        "maxsnr_5seeds_evaluation_summary.npz"
     ),
     "PF-HAPPO": (
         "results/results_multi_seed/"
-        "pf_happo_5seeds_on_ratio.npz"
+        "pf_happo_3train_5eval_summary.npz"
     ),
     "Jensen-HAPPO": (
         "results/results_multi_seed/"
-        "jensen_happo_5seeds_on_ratio.npz"
+        "jensen_happo_3train_5eval_summary.npz"
     ),
     "HeLyMARL": (
         "results/results_multi_seed/"
-        "helymarl_5seeds_on_ratio.npz"
+        "helymarl_3train_5eval_summary.npz"
     ),
 }
 
@@ -42,8 +42,9 @@ TARGET_ON_RATIO = 0.6
 
 # 평균 ± BAND_SCALE × 표준편차
 BAND_SCALE = 1.0
-BAND_ALPHA = 0.20
+BAND_ALPHA = 0.10
 
+SELECTED_TRAIN_SEED = 0
 
 # ============================================================
 # 3. 논문용 스타일
@@ -111,6 +112,138 @@ def moving_average(x, window):
 
     return result
 
+def load_bs_on_trajectory_from_eval(npz_path):
+    """
+    개별 evaluation npz에서 slot별 평균 BS ON-ratio [T]를 반환.
+    """
+    if not os.path.exists(npz_path):
+        raise FileNotFoundError(
+            f"Evaluation file not found: {npz_path}"
+        )
+
+    with np.load(
+        npz_path,
+        allow_pickle=True,
+    ) as data:
+
+        # ----------------------------------------------------
+        # Case 1: power_mat
+        # ----------------------------------------------------
+        if "power_mat" in data.files:
+            power_mat = np.asarray(
+                data["power_mat"],
+                dtype=float,
+            )
+            power_mat = np.squeeze(power_mat)
+
+            if power_mat.ndim != 2:
+                raise ValueError(
+                    f"power_mat must be 2-D, "
+                    f"got {power_mat.shape}"
+                )
+
+            # [T,B] -> [B,T]
+            if (
+                power_mat.shape[0] > power_mat.shape[1]
+                and power_mat.shape[1] <= 20
+            ):
+                power_mat = power_mat.T
+
+            bs_on_mat = (
+                power_mat > 0.0
+            ).astype(float)
+
+            return np.mean(
+                bs_on_mat,
+                axis=0,
+            )
+
+        # ----------------------------------------------------
+        # Case 2: bs_on_mat
+        # ----------------------------------------------------
+        if "bs_on_mat" in data.files:
+            bs_on_mat = np.asarray(
+                data["bs_on_mat"],
+                dtype=float,
+            )
+            bs_on_mat = np.squeeze(bs_on_mat)
+
+            if bs_on_mat.ndim != 2:
+                raise ValueError(
+                    f"bs_on_mat must be 2-D, "
+                    f"got {bs_on_mat.shape}"
+                )
+
+            # [T,B] -> [B,T]
+            if (
+                bs_on_mat.shape[0] > bs_on_mat.shape[1]
+                and bs_on_mat.shape[1] <= 20
+            ):
+                bs_on_mat = bs_on_mat.T
+
+            bs_on_mat = (
+                bs_on_mat > 0.0
+            ).astype(float)
+
+            return np.mean(
+                bs_on_mat,
+                axis=0,
+            )
+
+        # ----------------------------------------------------
+        # Case 3: power_bs1, power_bs2, ...
+        # ----------------------------------------------------
+        power_keys = [
+            key
+            for key in data.files
+            if key.startswith("power_bs")
+        ]
+
+        if power_keys:
+            power_keys.sort(
+                key=lambda key: int(
+                    "".join(
+                        character
+                        for character in key
+                        if character.isdigit()
+                    )
+                )
+            )
+
+            rows = [
+                np.asarray(
+                    data[key],
+                    dtype=float,
+                ).reshape(-1)
+                for key in power_keys
+            ]
+
+            common_length = min(
+                len(row)
+                for row in rows
+            )
+
+            power_mat = np.stack(
+                [
+                    row[:common_length]
+                    for row in rows
+                ],
+                axis=0,
+            )
+
+            bs_on_mat = (
+                power_mat > 0.0
+            ).astype(float)
+
+            return np.mean(
+                bs_on_mat,
+                axis=0,
+            )
+
+        raise KeyError(
+            f"No BS ON/OFF data in {npz_path}. "
+            f"Available keys: {data.files}"
+        )
 
 # ============================================================
 # 5. Multi-seed trajectory 불러오기
@@ -147,6 +280,156 @@ def load_multi_seed_trajectory(
             ),
             dtype=int,
         ).reshape(-1)
+
+        train_seeds = np.asarray(
+            data.get(
+                "train_seeds",
+                [],
+            ),
+            dtype=int,
+        ).reshape(-1)
+        # ====================================================
+        # 학습 기반 알고리즘:
+        # 선택한 train seed의 개별 eval 파일 5개를 직접 읽음
+        # ====================================================
+        if train_seeds.size > 0:
+            eval_paths = np.asarray(
+                data.get(
+                    "eval_paths",
+                    [],
+                ),
+                dtype=str,
+            ).reshape(-1)
+
+            selected_eval_paths = []
+
+            train_seed_token = (
+                f"seed_{SELECTED_TRAIN_SEED}"
+            )
+
+            for eval_path in eval_paths:
+                normalized_path = str(
+                    eval_path
+                ).replace("\\", "/")
+
+                parent_directory = os.path.basename(
+                    os.path.dirname(
+                        normalized_path
+                    )
+                )
+
+                # 예:
+                # kappa_0.03_seed_0/eval_seed_2000.npz
+                if train_seed_token in parent_directory:
+                    selected_eval_paths.append(
+                        str(eval_path)
+                    )
+
+            if not selected_eval_paths:
+                raise ValueError(
+                    f"No evaluation files found for "
+                    f"training seed {SELECTED_TRAIN_SEED}. "
+                    f"Available eval paths: "
+                    f"{eval_paths.tolist()}"
+                )
+
+            eval_trajectories = []
+
+            for eval_path in selected_eval_paths:
+                trajectory = (
+                    load_bs_on_trajectory_from_eval(
+                        eval_path
+                    )
+                )
+
+                trajectory = trajectory[
+                    :max_steps
+                ]
+
+                trajectory = moving_average(
+                    trajectory,
+                    smooth_window,
+                )
+
+                eval_trajectories.append(
+                    trajectory
+                )
+
+            min_length = min(
+                len(trajectory)
+                for trajectory
+                in eval_trajectories
+            )
+
+            smoothed_per_seed = np.stack(
+                [
+                    trajectory[:min_length]
+                    for trajectory
+                    in eval_trajectories
+                ],
+                axis=0,
+            )
+            # [5 eval seeds, T]
+
+            trajectory_mean = np.nanmean(
+                smoothed_per_seed,
+                axis=0,
+            )
+
+            ddof = (
+                1
+                if smoothed_per_seed.shape[0] > 1
+                else 0
+            )
+
+            trajectory_var = np.nanvar(
+                smoothed_per_seed,
+                axis=0,
+                ddof=ddof,
+            )
+
+            trajectory_std = np.nanstd(
+                smoothed_per_seed,
+                axis=0,
+                ddof=ddof,
+            )
+
+            selected_eval_seeds = []
+
+            for eval_path in selected_eval_paths:
+                filename = os.path.basename(
+                    eval_path
+                )
+
+                seed_text = (
+                    filename
+                    .replace("eval_seed_", "")
+                    .replace(".npz", "")
+                )
+
+                try:
+                    selected_eval_seeds.append(
+                        int(seed_text)
+                    )
+                except ValueError:
+                    pass
+
+            print(
+                f"[SELECTED TRAIN SEED] "
+                f"train_seed={SELECTED_TRAIN_SEED}, "
+                f"eval files={len(selected_eval_paths)}"
+            )
+
+            return {
+                "mean": trajectory_mean,
+                "var": trajectory_var,
+                "std": trajectory_std,
+                "per_seed": smoothed_per_seed,
+                "eval_seeds": np.asarray(
+                    selected_eval_seeds,
+                    dtype=int,
+                ),
+            }
 
         # ----------------------------------------------------
         # 권장 방식:

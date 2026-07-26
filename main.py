@@ -126,6 +126,268 @@ def make_eval_npz_path(algorithm, kappa, train_seed, eval_seed):
 # ============================================================
 # Metric helpers
 # ============================================================
+# ============================================================
+# Standalone association-stability evaluation
+# trainer 수정 없이 main.py에서 계산
+# ============================================================
+@torch.no_grad()
+def evaluate_stability_metrics(
+    trainer,
+    env,
+    eval_seed,
+    steps_per_episode,
+    deterministic=False,
+):
+    """
+    Returns
+    -------
+    request_dwell_time:
+        UE가 같은 BS를 연속 요청한 평균 슬롯 수
+
+    request_switch_ratio:
+        연속 슬롯 사이 UE 요청 BS가 변경된 비율
+
+    conditional_handover_ratio:
+        미서비스 슬롯을 제외한 service-event 사이에서
+        실제 serving BS가 변경된 비율
+
+    same_bs_retention_ratio:
+        service-event 사이에서 같은 BS가 유지된 비율
+
+    service_dwell_events:
+        같은 serving BS가 연속된 평균 service-event 수
+    """
+    set_seed(int(eval_seed))
+
+    trainer.ue_actor.eval()
+    trainer.bs_actor.eval()
+    trainer.critic.eval()
+
+    local_obs, global_obs = env.reset()
+
+    request_history = []
+    served_bs_history = []
+
+    for _ in range(steps_per_episode):
+        (
+            ue_actions,
+            _ue_logp,
+            _ue_entropy,
+            _ue_masks,
+            bs_actions,
+            _bs_logp,
+            _bs_entropy,
+            _bs_obs,
+            _bs_masks,
+            cand_lists,
+            _value,
+        ) = trainer.select_actions(
+            local_obs=local_obs,
+            global_obs=global_obs,
+            env=env,
+            deterministic=deterministic,
+        )
+
+        (
+            next_local_obs,
+            next_global_obs,
+            info,
+            done,
+        ) = env.step_joint(
+            ue_actions=ue_actions,
+            bs_actions=bs_actions,
+            cand_lists=cand_lists,
+        )
+
+        # ----------------------------------------------------
+        # 각 UE가 요청한 BS action
+        # shape after rollout: [T, N]
+        # ----------------------------------------------------
+        request_history.append(
+            [
+                int(ue_actions[user.ue_id])
+                for user in env.users
+            ]
+        )
+
+        # ----------------------------------------------------
+        # 각 UE를 실제로 서비스한 BS
+        # 0 = 해당 슬롯에 서비스받지 않음
+        # ----------------------------------------------------
+        served_bs_of_user = info.get(
+            "served_bs_of_user",
+            {},
+        )
+
+        served_bs_history.append(
+            [
+                (
+                    0
+                    if served_bs_of_user.get(
+                        user.ue_id,
+                        None,
+                    ) is None
+                    else int(
+                        served_bs_of_user[user.ue_id]
+                    )
+                )
+                for user in env.users
+            ]
+        )
+
+        local_obs = next_local_obs
+        global_obs = next_global_obs
+
+        if done:
+            break
+
+    request_arr = np.asarray(
+        request_history,
+        dtype=np.int64,
+    )
+
+    served_arr = np.asarray(
+        served_bs_history,
+        dtype=np.int64,
+    )
+
+    # ========================================================
+    # 1. Request-BS stability
+    # ========================================================
+    if (
+        request_arr.ndim == 2
+        and request_arr.shape[0] > 1
+    ):
+        request_switch_flags = (
+            request_arr[1:] != request_arr[:-1]
+        )  # [T-1, N]
+
+        request_switch_ratio = float(
+            np.mean(request_switch_flags)
+        )
+
+        # UE별 연속 request run 개수
+        request_runs_per_user = (
+            np.sum(
+                request_switch_flags,
+                axis=0,
+            )
+            + 1
+        )
+
+        # UE별 평균 dwell을 계산한 뒤 사용자 평균
+        request_dwell_per_user = (
+            request_arr.shape[0]
+            / np.maximum(
+                request_runs_per_user,
+                1,
+            )
+        )
+
+        request_dwell_time = float(
+            np.mean(request_dwell_per_user)
+        )
+
+    elif request_arr.shape[0] == 1:
+        request_switch_ratio = 0.0
+        request_dwell_time = 1.0
+
+    else:
+        request_switch_ratio = np.nan
+        request_dwell_time = np.nan
+
+    # ========================================================
+    # 2. Actual serving-BS stability
+    # 미서비스 슬롯은 제외
+    # ========================================================
+    total_service_transitions = 0
+    total_service_switches = 0
+    service_dwell_per_user = []
+
+    if served_arr.ndim == 2:
+        num_users = served_arr.shape[1]
+
+        for user_idx in range(num_users):
+            service_sequence = served_arr[:, user_idx]
+
+            # 0: 미서비스 슬롯 제거
+            service_sequence = service_sequence[
+                service_sequence > 0
+            ]
+
+            if service_sequence.size == 0:
+                continue
+
+            if service_sequence.size == 1:
+                service_dwell_per_user.append(1.0)
+                continue
+
+            service_switch_flags = (
+                service_sequence[1:]
+                != service_sequence[:-1]
+            )
+
+            num_transitions = (
+                service_sequence.size - 1
+            )
+
+            num_switches = int(
+                np.sum(service_switch_flags)
+            )
+
+            total_service_transitions += (
+                num_transitions
+            )
+
+            total_service_switches += (
+                num_switches
+            )
+
+            num_service_runs = num_switches + 1
+
+            service_dwell_per_user.append(
+                float(
+                    service_sequence.size
+                    / num_service_runs
+                )
+            )
+
+    if total_service_transitions > 0:
+        conditional_handover_ratio = float(
+            total_service_switches
+            / total_service_transitions
+        )
+
+        same_bs_retention_ratio = float(
+            1.0 - conditional_handover_ratio
+        )
+    else:
+        conditional_handover_ratio = 0.0
+        same_bs_retention_ratio = 1.0
+
+    service_dwell_events = (
+        float(np.mean(service_dwell_per_user))
+        if service_dwell_per_user
+        else np.nan
+    )
+
+    return {
+        "request_dwell_time":
+            request_dwell_time,
+
+        "request_switch_ratio":
+            request_switch_ratio,
+
+        "conditional_handover_ratio":
+            conditional_handover_ratio,
+
+        "same_bs_retention_ratio":
+            same_bs_retention_ratio,
+
+        "service_dwell_events":
+            service_dwell_events,
+    }
+
 def safe_mean(value):
     arr = np.asarray(value, dtype=np.float64).reshape(-1)
     arr = arr[np.isfinite(arr)]
@@ -253,6 +515,11 @@ METRIC_NAMES = [
     "fairness",
     "on_ratio",
     "handover_ratio",
+    "request_dwell_time",
+    "request_switch_ratio",
+    "conditional_handover_ratio",
+    "same_bs_retention_ratio",
+    "service_dwell_events",
     "served_ratio",
     "outage_ratio",
     "reward",
@@ -381,7 +648,15 @@ def print_final_summary(final_rows):
             f"ON={row['on_ratio_mean']:.4f}"
             f" +/- {row['on_ratio_std']:.4f} | "
             f"HO={row['handover_ratio_mean']:.4f}"
-            f" +/- {row['handover_ratio_std']:.4f}"
+            f" +/- {row['handover_ratio_std']:.4f} | "
+            f"ReqDwell={row['request_dwell_time_mean']:.2f}"
+            f" +/- {row['request_dwell_time_std']:.2f} | "
+            f"ReqSwitch={row['request_switch_ratio_mean']:.4f}"
+            f" +/- {row['request_switch_ratio_std']:.4f} | "
+            f"CondHO={row['conditional_handover_ratio_mean']:.4f}"
+            f" +/- {row['conditional_handover_ratio_std']:.4f} | "
+            f"SameBS={row['same_bs_retention_ratio_mean']:.4f}"
+            f" +/- {row['same_bs_retention_ratio_std']:.4f}"
         )
 
     print("=" * 125 + "\n")
@@ -455,6 +730,13 @@ def evaluate_one_model(algorithm, kappa, train_seed, eval_seed):
         save_npz_path=eval_npz_path
     )
     metrics = extract_eval_metrics(results=results, lambda_E=LAMBDA_E, objective_window=OBJECTIVE_WINDOW)
+    stability_metrics = evaluate_stability_metrics(
+        trainer=trainer,
+        env=env_hard,
+        eval_seed=eval_seed,
+        steps_per_episode=STEPS_PER_EPISODE,
+        deterministic=False,
+    )
     print(
         f"[OBJECTIVE] "
         f"PF={metrics['pf_utility']:.6f} | "
@@ -468,8 +750,7 @@ def evaluate_one_model(algorithm, kappa, train_seed, eval_seed):
         "train_seed": int(train_seed),
         "eval_seed": int(eval_seed),
         **metrics,
-        # "model_path": model_path,
-        # "eval_npz_path": eval_npz_path,
+        **stability_metrics,
     }
 
     del trainer

@@ -1,305 +1,964 @@
 import os
 import matplotlib
 import matplotlib.font_manager as fm
+
 fm._load_fontmanager(try_read_cache=False)
 
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 plt.rcParams.update({
     "font.family": "Times New Roman",
     "mathtext.fontset": "stix",
     "font.size": 22,
-    # "font.weight": "bold",
     "axes.titlesize": 22,
     "axes.labelsize": 20,
-    # "axes.labelweight": "bold",
     "xtick.labelsize": 20,
     "ytick.labelsize": 20,
-    "legend.fontsize": 20,
-    "pdf.fonttype": 42,
+    "legend.fontsize": 14,
     "ps.fonttype": 42,
 })
 
 
-def moving_average(x, window=1000):
-    x = np.asarray(x, dtype=np.float32)
-
-    if len(x) == 0:
-        return x
-
-    if window <= 1:
-        return x
-
-    if len(x) < window:
-        window = len(x)
-
-    kernel = np.ones(window, dtype=np.float32) / window
-    return np.convolve(x, kernel, mode="valid")
-
-# def moving_average(x, window=1000):
-#     """
-#     처음 window-1 step은 현재까지의 누적 평균,
-#     이후에는 trailing moving average를 계산한다.
-#     출력 길이는 입력 길이와 동일하다.
-#     """
-#     x = np.asarray(x, dtype=np.float32).reshape(-1)
-
-#     if x.size == 0:
-#         return x
-
-#     if window <= 1:
-#         return x.copy()
-
-#     window = min(window, len(x))
-
-#     cumsum = np.cumsum(
-#         np.insert(x.astype(np.float64), 0, 0.0)
-#     )
-
-#     result = np.empty(len(x), dtype=np.float32)
-
-#     for t in range(len(x)):
-#         start = max(0, t - window + 1)
-#         count = t - start + 1
-
-#         result[t] = (
-#             cumsum[t + 1] - cumsum[start]
-#         ) / count
-
-#     return result
-
-def episodic_moving_average(
-    x,
-    episode_length=10000,
-    window=1000,
-):
-    x = np.asarray(x, dtype=np.float32).reshape(-1)
-
-    x_parts = []
-    y_parts = []
-
-    for episode_start in range(0, len(x), episode_length):
-        episode_end = min(
-            episode_start + episode_length,
-            len(x),
-        )
-
-        episode_data = x[episode_start:episode_end]
-
-        if len(episode_data) == 0:
-            continue
-
-        episode_ma = moving_average(
-            episode_data,
-            window=window,
-        )
-
-        episode_x = np.arange(
-            episode_start,
-            episode_end,
-        )
-
-        x_parts.append(episode_x)
-        y_parts.append(episode_ma)
-
-        # 에피소드 사이의 선을 끊기 위한 NaN
-        x_parts.append(np.array([np.nan]))
-        y_parts.append(np.array([np.nan]))
-
-    if len(x_parts) == 0:
-        return np.array([]), np.array([])
-
-    return (
-        np.concatenate(x_parts),
-        np.concatenate(y_parts),
-    )
-
-def plot_train_curve(
+# ============================================================
+# Training constraint-gap plot
+# ============================================================
+def plot_train_constraint_gap(
     result_dir="results/results_kappa",
-    save_dir="results/results_kappa/plots",
+    save_dir="eval_compare_plots",
     kappas=(0.01, 0.02, 0.03),
-    episode_length=10000,
-    window=1000,
+    seeds=(0, 1, 2, 3, 4),
 ):
     os.makedirs(save_dir, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(7.5, 6.0))
 
     colors = ["C0", "C2", "C3"]
+    markers = ["o", "^", "s"]
+    line_styles = ["-", "--", "-."]
+
     found_train = False
+    max_episode = 0
 
     for i, kappa in enumerate(kappas):
-        train_path = os.path.join(
-            result_dir,
-            f"HeLyMARL_train_rewards_kappa_{kappa}.npz"
+        kappa_tag = f"{kappa:.2f}"
+
+        gap_per_seed = []
+        successful_seeds = []
+
+        # ====================================================
+        # 같은 kappa에 대해 seed 5개 불러오기
+        # ====================================================
+        for seed in seeds:
+            train_path = os.path.join(
+                result_dir,
+                f"HAPPO_kappa_{kappa_tag}_seed_{seed}",
+                "train.npz",
+            )
+
+            if not os.path.exists(train_path):
+                print(
+                    f"[Warning] Train file not found: "
+                    f"{train_path}"
+                )
+                continue
+
+            with np.load(
+                train_path,
+                allow_pickle=True,
+            ) as data:
+
+                # trainer에서 gap을 직접 저장한 경우
+                if "episode_handover_gap" in data.files:
+                    episode_gap = np.asarray(
+                        data["episode_handover_gap"],
+                        dtype=np.float64,
+                    ).reshape(-1)
+
+                # episode HO ratio만 있으면 gap 계산
+                elif "episode_handover_ratio" in data.files:
+                    episode_ratio = np.asarray(
+                        data["episode_handover_ratio"],
+                        dtype=np.float64,
+                    ).reshape(-1)
+
+                    if "kappa" in data.files:
+                        saved_kappa = float(
+                            np.asarray(
+                                data["kappa"]
+                            ).reshape(-1)[0]
+                        )
+                    else:
+                        saved_kappa = float(kappa)
+
+                    episode_gap = (
+                        episode_ratio
+                        - saved_kappa
+                    )
+
+                else:
+                    print(
+                        "[Warning] Neither "
+                        "'episode_handover_gap' nor "
+                        "'episode_handover_ratio' found in "
+                        f"{train_path}"
+                    )
+                    continue
+
+            if episode_gap.size == 0:
+                print(
+                    f"[Warning] Empty gap array: "
+                    f"{train_path}"
+                )
+                continue
+
+            gap_per_seed.append(episode_gap)
+            successful_seeds.append(seed)
+
+        if len(gap_per_seed) == 0:
+            print(
+                f"[Warning] No valid training seeds "
+                f"for kappa={kappa_tag}"
+            )
+            continue
+
+        # ====================================================
+        # 모든 seed의 episode 길이 통일
+        # ====================================================
+        common_length = min(
+            len(gap)
+            for gap in gap_per_seed
         )
 
-        if not os.path.exists(train_path):
-            print(f"[Warning] Train file not found: {train_path}")
-            continue
+        if any(
+            len(gap) != common_length
+            for gap in gap_per_seed
+        ):
+            print(
+                f"[Warning] Episode lengths differ for "
+                f"kappa={kappa_tag}. "
+                f"Truncated to {common_length} episodes."
+            )
 
-        data = np.load(train_path, allow_pickle=True)
+        gap_mat = np.stack(
+            [
+                gap[:common_length]
+                for gap in gap_per_seed
+            ],
+            axis=0,
+        )
 
-        if "handover_ratio" not in data:
-            print(f"[Warning] 'handover_ratio' not found in {train_path}")
-            continue
+        # gap_mat shape:
+        # [number of seeds, number of episodes]
+        ddof = (
+            1
+            if len(successful_seeds) > 1
+            else 0
+        )
 
-        ho_ratio = np.asanyarray(data["handover_ratio"], dtype=np.float32).reshape(-1)
-        ho_ma = moving_average(ho_ratio, window=window)
+        gap_mean = np.mean(
+            gap_mat,
+            axis=0,
+        )
 
-        x_step = np.arange(window -1, window - 1 + len(ho_ma))
-        x_episode = (x_step+1) / episode_length
+        gap_std = np.std(
+            gap_mat,
+            axis=0,
+            ddof=ddof,
+        )
 
-        if "handover_budget_ratio" in data:
-            budget = float(data["handover_budget_ratio"][0])
-        else:
-            budget = float(kappa)
+        episodes = np.arange(
+            1,
+            common_length + 1,
+        )
 
-        # x = np.arange(window - 1, window - 1 + len(ho_ma))
+        max_episode = max(
+            max_episode,
+            common_length,
+        )
+
         color = colors[i % len(colors)]
+        marker = markers[i % len(markers)]
+        linestyle = line_styles[
+            i % len(line_styles)
+        ]
 
+        # ====================================================
+        # Seed 평균 gap
+        # ====================================================
         ax.plot(
-            x_episode,
-            ho_ma,
-            linewidth=2.0,
+            episodes,
+            gap_mean,
+            linewidth=2.5,
+            linestyle=linestyle,
+            marker=marker,
+            markersize=5,
+            markevery=1,
             color=color,
-            label=f"Train $\\kappa$ = {budget:.2f}"
+            label=rf"$\kappa={kappa:.2f}$",
+            zorder=3,
         )
 
-        ax.axhline(
-            y=budget,
-            linestyle="--",
-            linewidth=1.3,
+        # ====================================================
+        # 평균 ± 표준편차
+        # ====================================================
+        ax.fill_between(
+            episodes,
+            gap_mean - gap_std,
+            gap_mean + gap_std,
             color=color,
-            alpha=0.9
+            alpha=0.05,
+            linewidth=0,
+            zorder=2,
+        )
+
+        print(
+            f"\n[Kappa={kappa:.2f}]"
+        )
+        print(
+            f"  Successful seeds: "
+            f"{successful_seeds}"
+        )
+        print(
+            f"  Final gap: "
+            f"{gap_mean[-1]:+.6f} "
+            f"± {gap_std[-1]:.6f}"
         )
 
         found_train = True
 
-    n_episodes = len(ho_ratio) / episode_length
+    # ========================================================
+    # Gap의 constraint boundary
+    #
+    # gap = HO ratio - kappa
+    # gap <= 0이면 constraint 만족
+    # ========================================================
+    ax.axhline(
+        y=0.0,
+        color="black",
+        linestyle="--",
+        linewidth=1.8,
+        label="Constraint boundary",
+        zorder=1,
+    )
 
-    ax.set_xlabel("Training Episode")
-    ax.set_ylabel(f"Handover Ratio (MA{window})")
+    ax.set_xlabel(
+        "Training Episode"
+    )
+
+    ax.set_ylabel(
+        r"Handover Constraint Gap "
+        r"$\bar{h}^{(k)}-\kappa$"
+    )
+
     if found_train:
-        ax.set_xlim(0, n_episodes)
-        ax.set_xticks(np.arange(0, int(np.floor(n_episodes)) + 1, 1))
-        ax.legend()
-    
-    ax.grid(True, alpha=0.3)
+        ax.set_xlim(
+            1,
+            max_episode,
+        )
+
+        ax.set_xticks(
+            np.arange(
+                1,
+                max_episode + 1,
+                1,
+            )
+        )
+
+        ax.legend(
+            loc="best",
+            fontsize=14,
+            markerscale=0.85,
+            handlelength=2.0,
+            labelspacing=0.4,
+            borderpad=0.5,
+            frameon=True,
+        )
+
+    ax.grid(
+        True,
+        alpha=0.3,
+    )
 
     plt.tight_layout()
 
-    save_path = os.path.join(
+    png_path = os.path.join(
         save_dir,
-        "train_handover_curve_kappa.png"
+        "train_handover_constraint_gap_5seeds.png",
     )
-    plt.savefig(save_path, dpi=300, bbox_inches="tight", format="png")
+
+    plt.savefig(
+        png_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
     plt.close()
 
-    print(f"✅ Saved: {save_path}")
+    print(f"\n✅ Saved: {png_path}")
 
-
-def plot_eval_bar(
+def plot_train_episode_handover_ratio(
     result_dir="results/results_kappa",
-    save_dir="results/results_kappa/plots",
+    save_dir="eval_compare_plots",
     kappas=(0.01, 0.02, 0.03),
+    seeds=(0, 1, 2, 3, 4),
 ):
     os.makedirs(save_dir, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(7.5, 6.0))
 
     colors = ["C0", "C2", "C3"]
+    markers = ["o", "^", "s"]
+    line_styles = ["-", "--", "-."]
 
-    eval_means = []
-    eval_labels = []
-
-    found_eval = False
+    found_train = False
+    max_episode = 0
 
     for i, kappa in enumerate(kappas):
-        eval_path = os.path.join(
-            result_dir,
-            f"HeLyMARL_eval_hard_kappa_{kappa}.npz"
-        )
+        kappa_tag = f"{kappa:.2f}"
 
-        if not os.path.exists(eval_path):
-            print(f"[Warning] Eval file not found: {eval_path}")
-            continue
+        episode_ratio_per_seed = []
+        successful_seeds = []
 
-        data = np.load(eval_path, allow_pickle=True)
-
-        if "handover_ratio" not in data:
-            print(f"[Warning] 'handover_ratio' not found in {eval_path}")
-            continue
-
-        ho_ratio = data["handover_ratio"].astype(np.float32)
-
-        if "handover_budget_ratio" in data:
-            budget = float(data["handover_budget_ratio"][0])
-        else:
-            budget = float(kappa)
-
-        mean_val = float(np.mean(ho_ratio))
-
-        eval_means.append(mean_val)
-        eval_labels.append(f"$\\kappa$ = {budget:.2f}")
-
-        found_eval = True
-
-    if found_eval:
-        x_bar = np.arange(len(eval_means))
-        bar_colors = [colors[i % len(colors)] for i in range(len(eval_means))]
-
-        ax.bar(
-            x_bar,
-            eval_means,
-            color=bar_colors,
-            alpha=0.85,
-            width=0.6
-        )
-
-        ax.set_xticks(x_bar)
-        ax.set_xticklabels(eval_labels)
-        ax.set_ylabel("Average Handover Ratio")
-        ax.set_ylim(0, 0.03)
-        ax.grid(True, axis="y", alpha=0.3)
-
-        for i, val in enumerate(eval_means):
-            ax.text(
-                i,
-                val + 0.001,
-                f"{val:.3f}",
-                ha="center",
-                va="bottom",
-                fontsize=17,
-                fontweight="bold"
+        # ====================================================
+        # 해당 kappa의 seed 5개 파일 로드
+        # ====================================================
+        for seed in seeds:
+            train_path = os.path.join(
+                result_dir,
+                f"HAPPO_kappa_{kappa_tag}_seed_{seed}",
+                "train.npz",
             )
+
+            if not os.path.exists(train_path):
+                print(
+                    f"[Warning] Train file not found: "
+                    f"{train_path}"
+                )
+                continue
+
+            with np.load(
+                train_path,
+                allow_pickle=True,
+            ) as data:
+                if (
+                    "episode_handover_ratio"
+                    not in data.files
+                ):
+                    print(
+                        "[Warning] "
+                        "'episode_handover_ratio' "
+                        f"not found in {train_path}"
+                    )
+                    continue
+
+                episode_ratio = np.asarray(
+                    data["episode_handover_ratio"],
+                    dtype=np.float64,
+                ).reshape(-1)
+
+            if episode_ratio.size == 0:
+                print(
+                    f"[Warning] Empty episode ratio: "
+                    f"{train_path}"
+                )
+                continue
+
+            episode_ratio_per_seed.append(
+                episode_ratio
+            )
+            successful_seeds.append(seed)
+
+        if len(episode_ratio_per_seed) == 0:
+            print(
+                f"[Warning] No valid seeds for "
+                f"kappa={kappa_tag}"
+            )
+            continue
+
+        # ====================================================
+        # 모든 seed 길이를 공통 episode 수로 통일
+        # ====================================================
+        common_length = min(
+            len(x)
+            for x in episode_ratio_per_seed
+        )
+
+        if any(
+            len(x) != common_length
+            for x in episode_ratio_per_seed
+        ):
+            print(
+                f"[Warning] Different episode lengths for "
+                f"kappa={kappa_tag}; "
+                f"truncated to {common_length}"
+            )
+
+        ratio_mat = np.stack(
+            [
+                x[:common_length]
+                for x in episode_ratio_per_seed
+            ],
+            axis=0,
+        )
+
+        # shape: [num_seeds, num_episodes]
+        ddof = (
+            1
+            if len(successful_seeds) > 1
+            else 0
+        )
+
+        ratio_mean = np.mean(
+            ratio_mat,
+            axis=0,
+        )
+
+        ratio_std = np.std(
+            ratio_mat,
+            axis=0,
+            ddof=ddof,
+        )
+
+        ratio_variance = np.var(
+            ratio_mat,
+            axis=0,
+            ddof=ddof,
+        )
+
+        episodes = np.arange(
+            1,
+            common_length + 1,
+        )
+
+        max_episode = max(
+            max_episode,
+            common_length,
+        )
+
+        color = colors[i % len(colors)]
+        marker = markers[i % len(markers)]
+        linestyle = line_styles[
+            i % len(line_styles)
+        ]
+
+        # ====================================================
+        # Seed 평균
+        # ====================================================
+        ax.plot(
+            episodes,
+            ratio_mean,
+            linewidth=2.5,
+            linestyle=linestyle,
+            marker=marker,
+            markersize=7,
+            markevery=1,
+            color=color,
+            label=rf"$\kappa={kappa:.2f}$",
+            zorder=3,
+        )
+
+        # ====================================================
+        # 평균 ± 표준편차 음영
+        # ====================================================
+        ax.fill_between(
+            episodes,
+            ratio_mean - ratio_std,
+            ratio_mean + ratio_std,
+            color=color,
+            alpha=0.05,
+            linewidth=0,
+            zorder=2,
+        )
+
+        # ====================================================
+        # 해당 kappa constraint
+        # ====================================================
+        ax.axhline(
+            y=kappa,
+            color=color,
+            linestyle=":",
+            linewidth=1.8,
+            alpha=0.9,
+            zorder=1,
+        )
+
+        print(
+            f"\n[Kappa={kappa:.2f}]"
+        )
+        print(
+            f"  Successful seeds: "
+            f"{successful_seeds}"
+        )
+        print(
+            f"  Final ratio: "
+            f"{ratio_mean[-1]:.6f} "
+            f"± {ratio_std[-1]:.6f}"
+        )
+        print(
+            f"  Final variance: "
+            f"{ratio_variance[-1]:.8f}"
+        )
+        print(
+            f"  Final gap: "
+            f"{ratio_mean[-1] - kappa:+.6f}"
+        )
+
+        found_train = True
+
+    ax.set_xlabel(
+        "Training Episode"
+    )
+
+    ax.set_ylabel(
+        "Episode-Average Handover Ratio"
+    )
+
+    if found_train:
+        ax.set_xlim(
+            1,
+            max_episode,
+        )
+
+        ax.set_xticks(
+            np.arange(
+                1,
+                max_episode + 1,
+                1,
+            )
+        )
+
+        ax.legend(
+            loc="upper right",
+            fontsize=14,
+            markerscale=0.85,
+            handlelength=2.0,
+            labelspacing=0.4,
+            borderpad=0.5,
+            frameon=True,
+        )
+
+    ax.grid(
+        True,
+        alpha=0.3,
+    )
 
     plt.tight_layout()
 
-    save_path = os.path.join(
+    png_path = os.path.join(
         save_dir,
-        "eval_handover_bar_kappa.png"
+        "train_episode_handover_ratio_kappa_5seeds.png",
     )
-    plt.savefig(save_path, dpi=300, bbox_inches="tight", format="png")
+
+    plt.savefig(
+        png_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
     plt.close()
 
-    print(f"✅ Saved: {save_path}")
+    print(f"\n✅ Saved: {png_path}")
 
+
+# ============================================================
+# Final hard-evaluation USER handover ratio bar plot
+#
+# Bar height : mean across users
+# Error bar  : minimum ~ maximum across users
+# ============================================================
+def plot_eval_bar(
+    result_dir="results/results_kappa",
+    save_dir="eval_compare_plots",
+    kappas=(0.01, 0.02, 0.03),
+    train_seeds=(0, 1, 2, 3, 4),
+    eval_seeds=(2000, 2001, 2002, 2003, 2004),
+):
+    os.makedirs(
+        save_dir,
+        exist_ok=True,
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(7.5, 6.0)
+    )
+
+    colors = [
+        "C0",
+        "C2",
+        "C3",
+    ]
+
+    eval_means = []
+    eval_mins = []
+    eval_maxs = []
+    eval_budgets = []
+    eval_labels = []
+
+    for kappa in kappas:
+        kappa_tag = f"{kappa:.2f}"
+
+        all_user_ho_ratios = []
+        successful_paths = []
+
+        # ====================================================
+        # train seed × eval seed 결과 모두 수집
+        # ====================================================
+        for train_seed in train_seeds:
+            run_dir = os.path.join(
+                result_dir,
+                (
+                    f"HAPPO_kappa_{kappa_tag}_"
+                    f"seed_{train_seed}"
+                ),
+            )
+
+            for eval_seed in eval_seeds:
+                eval_path = os.path.join(
+                    run_dir,
+                    f"eval_seed_{eval_seed}.npz",
+                )
+
+                if not os.path.exists(eval_path):
+                    print(
+                        f"[Warning] Eval file not found: "
+                        f"{eval_path}"
+                    )
+                    continue
+
+                with np.load(
+                    eval_path,
+                    allow_pickle=True,
+                ) as data:
+
+                    # ----------------------------------------
+                    # Evaluation horizon
+                    # ----------------------------------------
+                    if "slot_rates" in data.files:
+                        slot_rates = np.asarray(
+                            data["slot_rates"]
+                        )
+
+                        if slot_rates.ndim >= 1:
+                            eval_steps = int(
+                                slot_rates.shape[0]
+                            )
+                        else:
+                            eval_steps = 10000
+
+                    elif "handover_ratio" in data.files:
+                        eval_steps = int(
+                            np.asarray(
+                                data["handover_ratio"]
+                            ).reshape(-1).size
+                        )
+
+                    elif "eval_steps" in data.files:
+                        eval_steps = int(
+                            np.asarray(
+                                data["eval_steps"]
+                            ).reshape(-1)[0]
+                        )
+
+                    else:
+                        eval_steps = 10000
+
+                    # ----------------------------------------
+                    # 사용자별 HO ratio
+                    # ----------------------------------------
+                    if (
+                        "handover_ratio_per_user"
+                        in data.files
+                    ):
+                        user_ho_ratio = np.asarray(
+                            data[
+                                "handover_ratio_per_user"
+                            ],
+                            dtype=np.float64,
+                        ).reshape(-1)
+
+                    elif (
+                        "handover_count_per_user"
+                        in data.files
+                    ):
+                        handover_count_per_user = (
+                            np.asarray(
+                                data[
+                                    "handover_count_per_user"
+                                ],
+                                dtype=np.float64,
+                            ).reshape(-1)
+                        )
+
+                        denominator = max(
+                            eval_steps - 1,
+                            1,
+                        )
+
+                        user_ho_ratio = (
+                            handover_count_per_user
+                            / denominator
+                        )
+
+                    else:
+                        print(
+                            "[Warning] Per-user HO result "
+                            f"not found: {eval_path}"
+                        )
+                        print(
+                            f"Available keys: {data.files}"
+                        )
+                        continue
+
+                user_ho_ratio = user_ho_ratio[
+                    np.isfinite(user_ho_ratio)
+                ]
+
+                if user_ho_ratio.size == 0:
+                    continue
+
+                all_user_ho_ratios.append(
+                    user_ho_ratio
+                )
+
+                successful_paths.append(
+                    eval_path
+                )
+
+        if len(all_user_ho_ratios) == 0:
+            print(
+                f"[Warning] No valid evaluation results "
+                f"for kappa={kappa_tag}"
+            )
+            continue
+
+        # 모든 train/eval seed의 사용자 결과 결합
+        all_user_ho_ratios = np.concatenate(
+            all_user_ho_ratios,
+            axis=0,
+        )
+
+        mean_val = float(
+            np.mean(all_user_ho_ratios)
+        )
+
+        min_val = float(
+            np.min(all_user_ho_ratios)
+        )
+
+        max_val = float(
+            np.max(all_user_ho_ratios)
+        )
+
+        budget = float(kappa)
+
+        eval_means.append(mean_val)
+        eval_mins.append(min_val)
+        eval_maxs.append(max_val)
+        eval_budgets.append(budget)
+        eval_labels.append(
+            rf"$\kappa={budget:.2f}$"
+        )
+
+        print(
+            f"\n[kappa={budget:.2f}]"
+        )
+        print(
+            f"  Successful eval files: "
+            f"{len(successful_paths)}"
+        )
+        print(
+            f"  Total user samples: "
+            f"{all_user_ho_ratios.size}"
+        )
+        print(
+            f"  User HO ratio min : "
+            f"{min_val:.6f}"
+        )
+        print(
+            f"  User HO ratio mean: "
+            f"{mean_val:.6f}"
+        )
+        print(
+            f"  User HO ratio max : "
+            f"{max_val:.6f}"
+        )
+
+    if len(eval_means) == 0:
+        plt.close()
+        print(
+            "[Warning] No evaluation files found."
+        )
+        return
+
+    eval_means = np.asarray(
+        eval_means,
+        dtype=np.float64,
+    )
+
+    eval_mins = np.asarray(
+        eval_mins,
+        dtype=np.float64,
+    )
+
+    eval_maxs = np.asarray(
+        eval_maxs,
+        dtype=np.float64,
+    )
+
+    eval_budgets = np.asarray(
+        eval_budgets,
+        dtype=np.float64,
+    )
+
+    x_bar = np.arange(
+        len(eval_means)
+    )
+
+    bar_colors = [
+        colors[i % len(colors)]
+        for i in range(len(eval_means))
+    ]
+
+    bars = ax.bar(
+        x_bar,
+        eval_means,
+        color=bar_colors,
+        alpha=0.85,
+        width=0.6,
+        edgecolor="black",
+        linewidth=1.0,
+        zorder=2,
+    )
+
+    # 사용자별 minimum ~ maximum
+    yerr = np.vstack(
+        [
+            eval_means - eval_mins,
+            eval_maxs - eval_means,
+        ]
+    )
+
+    ax.errorbar(
+        x_bar,
+        eval_means,
+        yerr=yerr,
+        fmt="none",
+        ecolor="black",
+        elinewidth=1.8,
+        capsize=7,
+        capthick=1.8,
+        zorder=4,
+        label="User Min–Max",
+    )
+
+    ax.scatter(
+        x_bar,
+        eval_budgets,
+        marker="_",
+        s=500,
+        color="black",
+        linewidths=2.0,
+        label="HO constraint",
+        zorder=5,
+    )
+
+    ax.set_xticks(
+        x_bar
+    )
+
+    ax.set_xticklabels(
+        eval_labels
+    )
+
+    ax.set_ylabel(
+        "Per-User Handover Ratio"
+    )
+
+    max_y = max(
+        float(np.max(eval_maxs)),
+        float(np.max(eval_budgets)),
+    )
+
+    ax.set_ylim(
+        0,
+        max_y * 1.25,
+    )
+
+    ax.grid(
+        True,
+        axis="y",
+        alpha=0.3,
+        zorder=0,
+    )
+
+    ax.legend(
+        loc="best",
+    )
+
+    text_offset = max_y * 0.03
+
+    for bar, mean_val in zip(
+        bars,
+        eval_means,
+    ):
+        ax.text(
+            bar.get_x()
+            + bar.get_width() / 2,
+            mean_val + text_offset,
+            f"{mean_val:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=17,
+            zorder=6,
+        )
+
+    plt.tight_layout()
+
+    png_path = os.path.join(
+        save_dir,
+        (
+            "happo_eval_user_handover_"
+            "bar_kappa_minmax.png"
+        ),
+    )
+
+    plt.savefig(
+        png_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close()
+
+    print(
+        f"✅ Saved: {png_path}"
+    )
 
 if __name__ == "__main__":
-    kappas = (0.01, 0.02, 0.03)
+    kappas = (0.01, 0.02, 0.03,)
 
-    plot_train_curve(
+    seeds = (0, 1, 2, 3, 4,)
+    
+    plot_train_episode_handover_ratio(
         result_dir="results/results_kappa",
-        save_dir="results/results_kappa/plots",
+        save_dir="eval_compare_plots",
         kappas=kappas,
-        episode_length=10000,
-        window=2000,
+        seeds=seeds,
+    )
+
+    plot_train_constraint_gap(
+        result_dir="results/results_kappa",
+        save_dir="eval_compare_plots",
+        kappas=kappas,
+        seeds=seeds,
     )
 
     plot_eval_bar(
         result_dir="results/results_kappa",
-        save_dir="results/results_kappa/plots",
+        save_dir="eval_compare_plots",
         kappas=kappas,
+        train_seeds=seeds,
+        eval_seeds=(2000, 2001, 2002, 2003, 2004)
     )

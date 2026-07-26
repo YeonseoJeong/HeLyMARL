@@ -8,24 +8,24 @@ import matplotlib.pyplot as plt
 # ============================================================
 NPZ_FILES = {
     "DDPP": (
-        "results/results_compare/"
-        "DDPP_eval_lambda_0.0.npz"
+        "results/results_multi_seed/evaluations/ddpp/kappa_0.03/"
+        "eval_seed_2004.npz"
     ),
     "MaxSNR": (
-        "results/results_compare/"
-        "MaxSNR_eval_lambda_0.0.npz"
+        "results/results_multi_seed/evaluations/maxsnr/kappa_0.03/"
+        "eval_seed_2004.npz"
     ),
     "PF-HAPPO": (
-        "results/policy_improvement/pf/"
-        "ConstrainedHAPPO_pf_gamma_0.5_final_eval_kappa_0.03.npz"
+        "results/results_multi_seed/evaluations/pf_happo/kappa_0.03_seed_0/"
+        "eval_seed_2004.npz"
     ),
     "Jensen-HAPPO": (
-        "results/results_baselines/"
-        "ConstrainedHAPPO_jensen_eval_hard_kappa_0.03_use_dimensionless.npz"
+        "results/results_multi_seed/evaluations/jensen_happo/kappa_0.03_seed_0/"
+        "eval_seed_2004.npz"
     ),
     "HeLyMARL": (
-        "results/results_kappa/"
-        "HeLyMARL_eval_hard_kappa_0.03.npz"
+        "results/results_multi_seed/evaluations/helymarl/kappa_0.03_seed_0/"
+        "eval_seed_2004.npz"
     ),
 }
 
