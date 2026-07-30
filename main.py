@@ -17,13 +17,16 @@ from HeLyMARL.trainer_mappo import MAPPOTrainer
 # ============================================================
 # Experiment settings
 # ============================================================
-ALGORITHMS = ["MAPPO", "HAPPO"]
+ALGORITHMS = ["MAPPO"]
 TRAIN_SEEDS = [0, 1, 2]
 EVAL_SEEDS = [2000, 2001, 2002, 2003, 2004]
 
+NUM_USERS = 20
+NUM_BS = 3
+
 V = 5.0
 LAMBDA_E = 0.0
-KAPPA_LIST = [0.03]
+KAPPA_LIST = [0.015]
 
 STEPS_PER_EPISODE = 10000
 TRAIN_EPISODES = 10
@@ -32,10 +35,10 @@ UPDATE_INTERVAL = 128
 OBJECTIVE_WINDOW = 10000
 OBJECTIVE_EPS = 1e-12
 
-RUN_TRAIN = False
+RUN_TRAIN = True
 RUN_EVAL = True
 
-SAVE_DIR = "results/results_mappo_happo"
+SAVE_DIR = "results/results_kappa"
 
 # ============================================================
 # Environment
@@ -78,6 +81,7 @@ def make_env(
     )
     return env
 
+
 # ============================================================
 # Trainer
 # ============================================================
@@ -109,7 +113,7 @@ def make_trainer(env, algorithm, eval_env = None):
 # File paths
 # ============================================================
 def make_run_dir(algorithm, kappa, train_seed):
-    return os.path.join(SAVE_DIR, f"{algorithm}_kappa_{kappa:.2f}_seed_{train_seed}")
+    return os.path.join(SAVE_DIR, f"{algorithm}_kappa_{kappa:.3f}_seed_{train_seed}")
 
 def make_model_path(algorithm, kappa, train_seed):
     run_dir = make_run_dir(algorithm, kappa, train_seed)
@@ -637,7 +641,7 @@ def print_final_summary(final_rows):
 
     for row in final_rows:
         print(
-            f"kappa={row['kappa']:.2f} | "
+            f"kappa={row['kappa']:.3f} | "
             f"{row['algorithm']:5s} | "
             f"Throughput={row['throughput_mean']:.4f}"
             f" +/- {row['throughput_std']:.4f} | "
@@ -673,7 +677,7 @@ def train_one_model(algorithm, kappa, train_seed):
     print("\n" + "=" * 100)
     print(
         f"TRAIN | algorithm={algorithm} | "
-        f"kappa={kappa:.2f} | "
+        f"kappa={kappa:.3f} | "
         f"train_seed={train_seed}"
     )
     print("=" * 100)
@@ -713,7 +717,7 @@ def evaluate_one_model(algorithm, kappa, train_seed, eval_seed):
     print("\n" + "=" * 100)
     print(
         f"EVAL | algorithm={algorithm} | "
-        f"kappa={kappa:.2f} | "
+        f"kappa={kappa:.3f} | "
         f"train_seed={train_seed} | "
         f"eval_seed={eval_seed}"
     )

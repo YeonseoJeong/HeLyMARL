@@ -20,11 +20,15 @@ NPZ_FILES = {
         "results/results_multi_seed/"
         "jensen_happo_3train_5eval_summary.npz"
     ),
-    "HeLyMARL": (
-        "results/results_multi_seed/"
-        "helymarl_3train_5eval_summary.npz"
-    ),
 }
+
+# HeLyMARL은 summary npz 한 개가 아니라 아래 raw evaluation 파일에서 읽음:
+# results/results_kappa/HAPPO_kappa_0.030_seed_{train_seed}/eval_seed_{eval_seed}.npz
+HELYMARL_RAW_ROOT = "results/results_kappa"
+HELYMARL_FOLDER_PREFIX = "HAPPO"
+HELYMARL_KAPPA = 0.030
+HELYMARL_TRAIN_SEEDS = (0, 1, 2)
+HELYMARL_EVAL_SEEDS = (2000, 2001, 2002, 2003, 2004)
 
 
 # ============================================================
@@ -599,7 +603,183 @@ def calculate_seed_statistics(
 
 
 # ============================================================
-# 9. 알고리즘별 결과 로드
+# 9. HeLyMARL raw eval 파일 로드
+# ============================================================
+def load_slot_handover_ratio_from_eval(npz_path):
+    """
+    개별 eval_seed_XXXX.npz에서 슬롯별 평균 HO ratio [T]를 읽습니다.
+
+    우선순위:
+        1) handover_ratio
+        2) handover_ratio_history
+        3) handover_count / n_users
+    """
+    if not os.path.exists(npz_path):
+        raise FileNotFoundError(f"File not found: {npz_path}")
+
+    with np.load(npz_path, allow_pickle=True) as data:
+        if "handover_ratio" in data.files:
+            step_ratio = np.asarray(
+                data["handover_ratio"],
+                dtype=float,
+            ).reshape(-1)
+            loaded_key = "handover_ratio"
+
+        elif "handover_ratio_history" in data.files:
+            step_ratio = np.asarray(
+                data["handover_ratio_history"],
+                dtype=float,
+            ).reshape(-1)
+            loaded_key = "handover_ratio_history"
+
+        elif "handover_count" in data.files:
+            handover_count = np.asarray(
+                data["handover_count"],
+                dtype=float,
+            ).reshape(-1)
+
+            if "n_users" not in data.files:
+                raise KeyError(
+                    f"'handover_count'는 있지만 'n_users'가 없습니다: {npz_path}"
+                )
+
+            n_users = int(
+                np.asarray(data["n_users"]).reshape(-1)[0]
+            )
+            step_ratio = handover_count / max(n_users, 1)
+            loaded_key = "handover_count / n_users"
+
+        else:
+            raise KeyError(
+                "슬롯별 HO ratio key를 찾지 못했습니다.\n"
+                f"File: {npz_path}\n"
+                f"Available keys: {data.files}"
+            )
+
+    step_ratio = np.nan_to_num(
+        step_ratio,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+
+    return step_ratio, loaded_key
+
+
+def load_helymarl_raw_handover_trajectory(
+    result_root,
+    folder_prefix,
+    kappa,
+    train_seeds,
+    eval_seeds,
+    max_steps,
+    smooth_window=1,
+):
+    """
+    집계 순서:
+        1) 각 train seed에서 eval seeds를 먼저 평균
+        2) train-seed 평균 및 표준편차 계산
+
+    즉, 기존 성능표와 동일하게
+    "each train seed is first averaged over evaluation seeds"
+    방식을 사용합니다.
+    """
+    kappa_tag = f"{kappa:.3f}"
+
+    trajectory_per_train_seed = []
+    successful_train_seeds = []
+    loaded_keys = set()
+
+    for train_seed in train_seeds:
+        run_dir = os.path.join(
+            result_root,
+            f"{folder_prefix}_kappa_{kappa_tag}_seed_{train_seed}",
+        )
+
+        eval_trajectories = []
+        successful_eval_seeds = []
+
+        for eval_seed in eval_seeds:
+            eval_path = os.path.join(
+                run_dir,
+                f"eval_seed_{eval_seed}.npz",
+            )
+
+            if not os.path.exists(eval_path):
+                print(f"[Warning] HeLyMARL eval file not found: {eval_path}")
+                continue
+
+            step_ratio, loaded_key = (
+                load_slot_handover_ratio_from_eval(eval_path)
+            )
+            loaded_keys.add(loaded_key)
+
+            cumulative_ratio = compute_cumulative_handover_ratio(
+                step_ratio[:max_steps]
+            )
+            cumulative_ratio = moving_average(
+                cumulative_ratio,
+                smooth_window,
+            )
+
+            eval_trajectories.append(cumulative_ratio)
+            successful_eval_seeds.append(eval_seed)
+
+        if len(eval_trajectories) == 0:
+            print(
+                f"[Warning] No valid HeLyMARL eval files for train seed {train_seed}"
+            )
+            continue
+
+        common_length = min(len(x) for x in eval_trajectories)
+        eval_mat = np.stack(
+            [x[:common_length] for x in eval_trajectories],
+            axis=0,
+        )
+
+        # 같은 train seed의 5개 eval seed를 먼저 평균
+        train_seed_mean = np.nanmean(eval_mat, axis=0)
+
+        trajectory_per_train_seed.append(train_seed_mean)
+        successful_train_seeds.append(train_seed)
+
+        print(
+            f"[HeLyMARL kappa={kappa_tag}] "
+            f"train_seed={train_seed}, "
+            f"eval_seeds={successful_eval_seeds}"
+        )
+
+    if len(trajectory_per_train_seed) == 0:
+        raise RuntimeError(
+            f"HeLyMARL raw results를 찾지 못했습니다: "
+            f"{result_root}/{folder_prefix}_kappa_{kappa_tag}_seed_*"
+        )
+
+    common_length = min(
+        len(x) for x in trajectory_per_train_seed
+    )
+    trajectory_per_train_seed = np.stack(
+        [
+            x[:common_length]
+            for x in trajectory_per_train_seed
+        ],
+        axis=0,
+    )
+
+    return calculate_seed_statistics(
+        trajectory_per_seed=trajectory_per_train_seed,
+        # 기존 출력 코드가 길이를 seed 수로 사용하므로 train seeds를 전달
+        eval_seeds=np.asarray(successful_train_seeds, dtype=int),
+        loaded_key=(
+            f"raw {folder_prefix}_kappa_{kappa_tag}/eval_seed_*.npz; "
+            f"keys={sorted(loaded_keys)}; "
+            "eval-mean per train seed"
+        ),
+    )
+
+
+# ============================================================
+# 10. 알고리즘별 결과 로드
 # ============================================================
 trajectory_results = {}
 
@@ -641,6 +821,33 @@ for algorithm, npz_path in NPZ_FILES.items():
             f"[WARNING] {algorithm}: {error}"
         )
 
+# HeLyMARL: kappa=0.030 raw eval files
+try:
+    result = load_helymarl_raw_handover_trajectory(
+        result_root=HELYMARL_RAW_ROOT,
+        folder_prefix=HELYMARL_FOLDER_PREFIX,
+        kappa=HELYMARL_KAPPA,
+        train_seeds=HELYMARL_TRAIN_SEEDS,
+        eval_seeds=HELYMARL_EVAL_SEEDS,
+        max_steps=MAX_STEPS,
+        smooth_window=SMOOTH_WINDOW,
+    )
+    trajectory_results["HeLyMARL"] = result
+
+    final_mean = float(result["mean"][-1])
+    final_std = float(result["std"][-1])
+
+    print(
+        f"[HeLyMARL] key={result['loaded_key']}, "
+        f"train seeds={result['per_seed'].shape[0]}, "
+        f"trajectory length={len(result['mean'])}, "
+        f"final cumulative HO ratio="
+        f"{final_mean:.4f} ± {final_std:.4f}"
+    )
+
+except Exception as error:
+    print(f"[WARNING] HeLyMARL: {error}")
+
 
 if not trajectory_results:
     raise RuntimeError(
@@ -649,7 +856,7 @@ if not trajectory_results:
 
 
 # ============================================================
-# 10. Line style
+# 11. Line style
 # ============================================================
 line_styles = {
     "DDPP": {
@@ -676,7 +883,7 @@ line_styles = {
 
 
 # ============================================================
-# 11. Figure 생성
+# 12. Figure 생성
 # ============================================================
 fig, ax = plt.subplots(
     figsize=(9.2, 5.4)
@@ -749,7 +956,7 @@ for algorithm, result in trajectory_results.items():
 
 
 # ============================================================
-# 12. Handover budget κ
+# 13. Handover budget κ
 # ============================================================
 ax.axhline(
     y=TARGET_KAPPA,
@@ -763,7 +970,7 @@ ax.axhline(
 
 
 # ============================================================
-# 13. 축 설정
+# 14. 축 설정
 # ============================================================
 ax.set_xlabel("Time step")
 ax.set_ylabel("Mean cumulative handover ratio")
@@ -828,7 +1035,7 @@ ax.spines["right"].set_visible(False)
 
 
 # ============================================================
-# 14. Legend
+# 15. Legend
 # ============================================================
 ax.legend(
     loc="upper right",
@@ -843,7 +1050,7 @@ plt.tight_layout()
 
 
 # ============================================================
-# 15. 저장
+# 16. 저장
 # ============================================================
 png_path = os.path.join(
     SAVE_DIR,

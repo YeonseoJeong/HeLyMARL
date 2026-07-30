@@ -158,7 +158,7 @@ class HAPPOEnvironment:
 
         self.Q_u = {u.ue_id: 0.1 for u in self.users}
         self.G_u = {u.ue_id: 0.0 for u in self.users}
-        self.Z_b = {bs.bs_id: 0.01 for bs in self.base_stations}
+        self.Z_b = {bs.bs_id: 0.0 for bs in self.base_stations}
         self.R_max = {u.ue_id: 5.0 for u in self.users}
 
         self.m_u = {u.ue_id: 0 for u in self.users}
@@ -476,10 +476,19 @@ class HAPPOEnvironment:
             for ue_id in reqs:
                 ui = self.ue_id_to_index[ue_id]
                 rate = float(self._rate_cache[ui, bi])
+
                 if rate <= 0.0:
                     continue
 
-                score = float(self.Q_u[ue_id] * rate)
+                prev_bs = int(self.m_u.get(ue_id, 0))
+                
+                # 이전에 실제로 서비스된 BS가 없으면 첫 association은 HO가 아님
+                if prev_bs == 0:
+                    h_cand = 0.0
+                else:
+                    h_cand = float(bs.bs_id != prev_bs)
+
+                score = float(self.Q_u[ue_id] * rate - self.G_u[ue_id] * h_cand)
                 scored.append((score, ue_id, rate))
 
             scored.sort(key=lambda x: x[0], reverse=True)
@@ -644,7 +653,7 @@ class HAPPOEnvironment:
         for bs in self.base_stations:
             power = power_consumed[bs.bs_id]
             budget = self.P_bar[bs.bs_id]
-            self.Z_b[bs.bs_id] = max(0.001, self.Z_b[bs.bs_id] + (power - budget))
+            self.Z_b[bs.bs_id] = max(0.0, self.Z_b[bs.bs_id] + (power - budget))
 
         for u in self.users:
             ue_id = u.ue_id

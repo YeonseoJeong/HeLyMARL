@@ -24,7 +24,7 @@ NPZ_FILES = {
         "eval_seed_2004.npz"
     ),
     "HeLyMARL": (
-        "results/results_multi_seed/evaluations/helymarl/kappa_0.03_seed_0/"
+        "results/results_kappa/HAPPO_kappa_0.030_seed_0/"
         "eval_seed_2004.npz"
     ),
 }
@@ -324,7 +324,7 @@ ax.axhline(
     linewidth=1.8,
     color="black",
     alpha=0.8,
-    label=r"Target $\rho=0.6$",
+    label=r"Target $\eta=0.6$",
 )
 
 

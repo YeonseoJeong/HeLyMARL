@@ -37,17 +37,35 @@ def generate_triangle_coverage(area_size: float=100,
     ]
     return small_bs_positions
 
-def generate_five_bs_coverage(area_size=100, coverage_radius=35):
-    center_x, center_y = area_size / 2, area_size / 2
-    offset = coverage_radius * 0.9
+def generate_five_bs_coverage(
+    area_size: float = 100,
+    coverage_radius: float = 35,
+) -> list:
+    """
+    Five-BS layout:
+        BS1: center
+        BS2: bottom-left
+        BS3: bottom-right
+        BS4: top-left
+        BS5: top-right
+
+    For area_size=100:
+        (50, 50), (25, 25), (75, 25), (25, 75), (75, 75)
+    """
+    center_x = area_size / 2
+    center_y = area_size / 2
+
+    # 100 x 100 area에서는 offset=25
+    offset = area_size / 4
 
     small_bs_positions = [
-        (center_x - offset, center_y - offset),  # bottom left
-        (center_x + offset, center_y - offset),  # bottom right
-        (center_x - offset, center_y + offset),  # top left
-        (center_x + offset, center_y + offset),  # top right
-        (center_x, center_y),                    # center
+        (center_x, center_y),                    # BS1: center
+        (center_x - offset, center_y - offset), # BS2: bottom-left
+        (center_x + offset, center_y - offset), # BS3: bottom-right
+        (center_x - offset, center_y + offset), # BS4: top-left
+        (center_x + offset, center_y + offset), # BS5: top-right
     ]
+
     return small_bs_positions
 
 

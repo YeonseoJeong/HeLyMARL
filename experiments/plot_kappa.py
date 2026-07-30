@@ -28,7 +28,7 @@ def plot_train_constraint_gap(
     result_dir="results/results_kappa",
     save_dir="eval_compare_plots",
     kappas=(0.01, 0.02, 0.03),
-    seeds=(0, 1, 2, 3, 4),
+    seeds=(0, 1, 2),
 ):
     os.makedirs(save_dir, exist_ok=True)
 
@@ -37,12 +37,15 @@ def plot_train_constraint_gap(
     colors = ["C0", "C2", "C3"]
     markers = ["o", "^", "s"]
     line_styles = ["-", "--", "-."]
+    # colors = ["C0", "C1", "C2", "C3"]
+    # markers = ["o", "D", "^", "s"]
+    # line_styles = ["-", "--", "-.", ":"]
 
     found_train = False
     max_episode = 0
 
     for i, kappa in enumerate(kappas):
-        kappa_tag = f"{kappa:.2f}"
+        kappa_tag = f"{kappa:.3f}"
 
         gap_per_seed = []
         successful_seeds = []
@@ -301,7 +304,7 @@ def plot_train_constraint_gap(
 def plot_train_episode_handover_ratio(
     result_dir="results/results_kappa",
     save_dir="eval_compare_plots",
-    kappas=(0.01, 0.02, 0.03),
+    kappas=(0.010, 0.020, 0.030),
     seeds=(0, 1, 2, 3, 4),
 ):
     os.makedirs(save_dir, exist_ok=True)
@@ -316,7 +319,7 @@ def plot_train_episode_handover_ratio(
     max_episode = 0
 
     for i, kappa in enumerate(kappas):
-        kappa_tag = f"{kappa:.2f}"
+        kappa_tag = f"{kappa:.3f}"
 
         episode_ratio_per_seed = []
         successful_seeds = []
@@ -455,7 +458,7 @@ def plot_train_episode_handover_ratio(
             markersize=7,
             markevery=1,
             color=color,
-            label=rf"$\kappa={kappa:.2f}$",
+            label=rf"$\kappa={kappa:.3f}$",
             zorder=3,
         )
 
@@ -467,7 +470,7 @@ def plot_train_episode_handover_ratio(
             ratio_mean - ratio_std,
             ratio_mean + ratio_std,
             color=color,
-            alpha=0.05,
+            alpha=0.10,
             linewidth=0,
             zorder=2,
         )
@@ -485,7 +488,7 @@ def plot_train_episode_handover_ratio(
         )
 
         print(
-            f"\n[Kappa={kappa:.2f}]"
+            f"\n[Kappa={kappa:.3f}]"
         )
         print(
             f"  Successful seeds: "
@@ -597,7 +600,7 @@ def plot_eval_bar(
     eval_labels = []
 
     for kappa in kappas:
-        kappa_tag = f"{kappa:.2f}"
+        kappa_tag = f"{kappa:.3f}"
 
         all_user_ho_ratios = []
         successful_paths = []
@@ -937,9 +940,9 @@ def plot_eval_bar(
     )
 
 if __name__ == "__main__":
-    kappas = (0.01, 0.02, 0.03,)
+    kappas = (0.010, 0.020, 0.030)
 
-    seeds = (0, 1, 2, 3, 4,)
+    seeds = (0, 1, 2)
     
     plot_train_episode_handover_ratio(
         result_dir="results/results_kappa",
