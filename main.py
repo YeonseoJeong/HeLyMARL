@@ -17,7 +17,7 @@ from HeLyMARL.trainer_mappo import MAPPOTrainer
 # ============================================================
 # Experiment settings
 # ============================================================
-ALGORITHMS = ["MAPPO"]
+ALGORITHMS = ["MAPPO", "HAPPO", "LyMARL"]
 TRAIN_SEEDS = [0, 1, 2]
 EVAL_SEEDS = [2000, 2001, 2002, 2003, 2004]
 

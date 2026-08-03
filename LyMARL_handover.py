@@ -317,7 +317,6 @@ class MAPPOEnvironment:
         # Queues
         self.Q_u = {u.ue_id: 0.1 for u in users}
         self.Z_b = {bs.bs_id: 0.0 for bs in self.base_stations}
-        self.G_u = {u.ue_id: 0.0 for u in users}
         self.R_max = {u.ue_id: 5.0 for u in users}
 
         # Previous requested BS and previous actually serving BS are tracked separately.
@@ -328,6 +327,12 @@ class MAPPOEnvironment:
         # Per-window hard handover usage (evaluation only).
         self.hard_ho_limit = int(np.floor(self.kappa * max(1, self.hard_window_len - 1)))
         self.ho_used_in_window = {u.ue_id: 0 for u in users}
+
+        # Per-slot logging for candidate-level hard-HO filtering.
+        # These values are set in build_bs_decision_inputs() immediately
+        # before the BS actors sample their scheduling actions.
+        self.last_ho_blocked_candidate_count = 0
+        self.last_ho_no_valid_candidate_bs_count = 0
 
         # Channel / mobility
         self.noise_dbm = -174 + 10 * np.log10(500e6) + 5
@@ -365,30 +370,31 @@ class MAPPOEnvironment:
         self.ue_id_to_index = {u.ue_id: i for i, u in enumerate(self.users)}
         self.bs_id_to_index = {bs.bs_id: i for i, bs in enumerate(self.base_stations)}
 
-        # Observation dimensions
-        # UE local: [Q_u, G_u] + rates(n_bs) + Z_b(n_bs) + prev_assoc_one_hot(n_bs)
-        self.local_obs_dim = 2 + 3 * self.n_bs
+        # Observation dimensions for pure LyMARL (no handover queue/state).
+        # UE local: [Q_u] + rates(n_bs) + Z_b(n_bs)
+        self.local_obs_dim = 1 + 2 * self.n_bs
 
-        # BS local: [Z_b] + top-K scores
+        # BS local: [Z_b] + top-K Q_u * rate scores
         self.bs_obs_dim = 1 + self.bs_top_k
 
         # Global:
-        # per UE: [Q_u, G_u, rates(n_bs), prev_assoc(n_bs)] => n_agents * (2 + 2 * n_bs)
+        # per UE: [Q_u, rates(n_bs)] => n_agents * (1 + n_bs)
         # per BS: [Z_b] => n_bs
-        self.global_obs_dim = self.n_agents * (2 + 2 * self.n_bs) + self.n_bs
+        self.global_obs_dim = self.n_agents * (1 + self.n_bs) + self.n_bs
 
         self._rate_cache = np.zeros((self.n_agents, self.n_bs), dtype=np.float32)
         self.no_coverage_count = 0
 
         print(f"\n{'='*96}")
-        print(" MAPPO Environment")
+        print(" Pure LyMARL Environment (no HO queue)")
         print(f"{'='*96}")
         print(f"#UE={self.n_agents} | #BS={self.n_bs} | UE_action_dim={self.action_dim} | BS_action_dim={self.bs_action_dim}")
         print(f"V={self.V} | power_budget_ratio={self.power_budget_ratio} | bs_over_penalty={self.bs_over_penalty}")
-        print(f"UE team reward = mean_u[Q_u(t)*served_rate_u - G_u(t)*handover_u]")
-        print(f"Per-user reward = Q_u(t)*served_rate_u - G_u(t)*handover_u")
+        print(f"UE team reward = mean_u[Q_u(t)*served_rate_u]")
+        print(f"Per-user reward = Q_u(t)*served_rate_u")
         print(f"BS reward = OFF: 0, ON: log(served_rate) - P_tx*Z_b(t)")
         print(f"Hard constraint enabled: {self.use_hard_constraint}")
+        print("Hard HO handling = candidate-level filtering; BS OFF only if no valid candidate remains")
         print(f"local_obs_dim={self.local_obs_dim} | bs_obs_dim={self.bs_obs_dim} | global_obs_dim={self.global_obs_dim}")
         print(f"{'='*96}\n")
 
@@ -409,7 +415,6 @@ class MAPPOEnvironment:
         self.update_channel_gains(0)
 
         self.Q_u = {u.ue_id: 0.1 for u in self.users}
-        self.G_u = {u.ue_id: 0.0 for u in self.users}
         self.Z_b = {bs.bs_id: 0.0 for bs in self.base_stations}
         self.R_max = {u.ue_id: 5.0 for u in self.users}
 
@@ -417,6 +422,8 @@ class MAPPOEnvironment:
         self.prev_serving_bs = {u.ue_id: -1 for u in self.users}
         self.handover_count_per_user = {u.ue_id: 0 for u in self.users}
         self.ho_used_in_window = {u.ue_id: 0 for u in self.users}
+        self.last_ho_blocked_candidate_count = 0
+        self.last_ho_no_valid_candidate_bs_count = 0
 
         self.bs_on_hist = {bs.bs_id: deque(maxlen=self.on_window) for bs in self.base_stations}
         self.prev_req_ratio = {bs.bs_id: 0.0 for bs in self.base_stations}
@@ -600,22 +607,11 @@ class MAPPOEnvironment:
         ue = self.users[ui]
         ue_id = ue.ue_id
 
-        obs = [
-            float(self.Q_u[ue_id]),
-            float(self.G_u[ue_id]),
-        ]
+        obs = [float(self.Q_u[ue_id])]
         obs.extend(self._rate_cache[ui, :].tolist())
 
         for bs in self.base_stations:
             obs.append(float(self.Z_b[bs.bs_id]))
-
-        # Previous actual serving BS, represented as B-dimensional one-hot.
-        # At the first slot, all entries are zero.
-        prev_onehot = np.zeros(self.n_bs, dtype=np.float32)
-        prev_bs_id = int(self.prev_serving_bs[ue_id])
-        if prev_bs_id in self.bs_id_to_index:
-            prev_onehot[self.bs_id_to_index[prev_bs_id]] = 1.0
-        obs.extend(prev_onehot.tolist())
 
         result = np.asarray(obs, dtype=np.float32)
         assert result.shape[0] == self.local_obs_dim, (
@@ -628,14 +624,7 @@ class MAPPOEnvironment:
         for ui, ue in enumerate(self.users):
             ue_id = ue.ue_id
             obs.append(float(self.Q_u[ue_id]))
-            obs.append(float(self.G_u[ue_id]))
             obs.extend(self._rate_cache[ui, :].tolist())
-
-            prev_onehot = np.zeros(self.n_bs, dtype=np.float32)
-            prev_bs_id = int(self.prev_serving_bs[ue_id])
-            if prev_bs_id in self.bs_id_to_index:
-                prev_onehot[self.bs_id_to_index[prev_bs_id]] = 1.0
-            obs.extend(prev_onehot.tolist())
 
         for bs in self.base_stations:
             obs.append(float(self.Z_b[bs.bs_id]))
@@ -660,9 +649,12 @@ class MAPPOEnvironment:
     def _get_action_mask(self, ue_id: int) -> np.ndarray:
         """
         UE action mask over B association actions. There is no NO-REQUEST action.
-        During hard-constrained evaluation, a user that has exhausted its
-        handover budget is restricted to its previous serving BS whenever that
-        BS is currently selectable.
+
+        Pure LyMARL does not observe or mask UE association actions using the
+        handover budget. During hard-constrained evaluation, the handover
+        budget is enforced at the BS candidate level: an exhausted UE is
+        removed only from BSs that would cause a new handover, while other
+        valid requesting UEs remain schedulable.
         """
         user = self.user_map[ue_id]
         mask = np.zeros(self.action_dim, dtype=bool)
@@ -675,25 +667,30 @@ class MAPPOEnvironment:
             distances = [float(bs.distance_to(user.position)) for bs in self.base_stations]
             mask[int(np.argmin(distances))] = True
 
-        if self.use_hard_constraint and self.ho_used_in_window[ue_id] >= self.hard_ho_limit:
-            prev_bs_id = int(self.prev_serving_bs[ue_id])
-            if prev_bs_id in self.bs_id_to_index:
-                prev_idx = self.bs_id_to_index[prev_bs_id]
-                restricted = np.zeros_like(mask)
-                restricted[prev_idx] = mask[prev_idx]
-                if restricted.any():
-                    mask = restricted
-
         return mask
 
     def build_bs_decision_inputs(self, ue_actions: Dict[int, int]) -> Tuple[np.ndarray, np.ndarray, List[List[int]]]:
         """
-        BS observation:
-            [Z_b, s_ext_1, ..., s_ext_K]
+        Pure-LyMARL BS observation:
+            [Z_b, s_1, ..., s_K]
         where
-            s_ext_{u,b}(t) = Q_u(t) * rate_{u,b}(t)
-                               - G_u(t) * h_cand_{u,b}(t).
-        h_cand is measured relative to the user's previous actual serving BS.
+            s_{u,b}(t) = Q_u(t) * rate_{u,b}(t).
+
+        Training / soft evaluation:
+            Candidate construction is the original pure-LyMARL Top-K rule.
+
+        Hard-constrained evaluation:
+            The HO budget is enforced per UE-BS candidate before Top-K is
+            formed. A candidate is infeasible only when
+
+                ho_used_u >= hard_ho_limit
+                and b != previous_serving_bs_u.
+
+            Thus, an exhausted UE is blocked only from a BS that would create
+            another handover. Other UEs requesting the same BS remain valid,
+            and valid lower-ranked requesters can move into the Top-K list.
+            The BS is forced to NONE/OFF only when no feasible candidate
+            remains (or when the learned BS policy voluntarily chooses NONE).
         """
         bs_requests = {bs.bs_id: [] for bs in self.base_stations}
 
@@ -707,18 +704,46 @@ class MAPPOEnvironment:
         bs_mask_batch = np.zeros((self.n_bs, self.bs_action_dim), dtype=bool)
         cand_lists: List[List[int]] = []
 
+        blocked_candidate_count = 0
+        no_valid_candidate_bs_count = 0
+
         for bi, bs in enumerate(self.base_stations):
             scored = []
+            positive_rate_request_count = 0
+
             for ue_id in bs_requests[bs.bs_id]:
                 ui = self.ue_id_to_index[ue_id]
                 rate = float(self._rate_cache[ui, bi])
                 if rate <= 0.0:
                     continue
 
-                prev_bs_id = int(self.prev_serving_bs[ue_id])
-                h_cand = 0.0 if prev_bs_id < 0 else float(bs.bs_id != prev_bs_id)
-                score = float(self.Q_u[ue_id] * rate - self.G_u[ue_id] * h_cand)
+                positive_rate_request_count += 1
+
+                # Candidate-level hard HO feasibility check.
+                # The first actual association is not a handover.
+                if self.use_hard_constraint:
+                    prev_bs_id = int(self.prev_serving_bs[ue_id])
+                    ho_exhausted = (
+                        self.ho_used_in_window[ue_id]
+                        >= self.hard_ho_limit
+                    )
+                    would_handover = (
+                        prev_bs_id >= 0
+                        and bs.bs_id != prev_bs_id
+                    )
+
+                    if ho_exhausted and would_handover:
+                        blocked_candidate_count += 1
+                        continue
+
+                score = float(self.Q_u[ue_id] * rate)
                 scored.append((score, ue_id))
+
+            # There were actual requesters with positive rate, but every one
+            # was infeasible solely because of the hard HO budget. In this
+            # case only the NONE/OFF action will remain valid for this BS.
+            if positive_rate_request_count > 0 and len(scored) == 0:
+                no_valid_candidate_bs_count += 1
 
             scored.sort(key=lambda x: x[0], reverse=True)
             top = scored[:self.bs_top_k]
@@ -735,9 +760,15 @@ class MAPPOEnvironment:
                 dtype=np.float32,
             )
 
+            # Candidate actions 0,...,K-1 are enabled only for feasible UEs.
             for k in range(self.bs_top_k):
                 bs_mask_batch[bi, k] = cand[k] >= 0
-            bs_mask_batch[bi, self.bs_top_k] = True  # BS NONE action
+
+            # Dedicated NONE/OFF action is always valid.
+            bs_mask_batch[bi, self.bs_top_k] = True
+
+        self.last_ho_blocked_candidate_count = int(blocked_candidate_count)
+        self.last_ho_no_valid_candidate_bs_count = int(no_valid_candidate_bs_count)
 
         return bs_obs_batch, bs_mask_batch, cand_lists
 
@@ -785,11 +816,55 @@ class MAPPOEnvironment:
             ui = self.ue_id_to_index[ue_id]
             bs_selections[bs.bs_id] = ue_id if float(self._rate_cache[ui, bi]) > 0.0 else None
 
-        # Hard energy cap during evaluation.
+        # Hard caps during evaluation.
+        #
+        # 1) Energy cap: force the BS OFF after its ON budget is exhausted.
+        # 2) Handover cap: normally already enforced in
+        #    build_bs_decision_inputs() by removing only infeasible UE-BS
+        #    candidates. The check below is retained as a safety guard.
+        ho_safety_forced_off_count = 0
         if self.use_hard_constraint:
             for bs in self.base_stations:
-                if self.bs_on_used_in_window[bs.bs_id] >= self.hard_on_limit[bs.bs_id]:
-                    bs_selections[bs.bs_id] = None
+                bs_id = bs.bs_id
+
+                if self.bs_on_used_in_window[bs_id] >= self.hard_on_limit[bs_id]:
+                    bs_selections[bs_id] = None
+                    continue
+
+                selected_ue = bs_selections[bs_id]
+                if selected_ue is None:
+                    continue
+
+                prev_bs_id = int(self.prev_serving_bs[selected_ue])
+                would_handover = (
+                    prev_bs_id >= 0
+                    and bs_id != prev_bs_id
+                )
+                ho_exhausted = (
+                    self.ho_used_in_window[selected_ue]
+                    >= self.hard_ho_limit
+                )
+
+                # This should normally be unreachable because the candidate
+                # was already filtered before action sampling.
+                if would_handover and ho_exhausted:
+                    bs_selections[bs_id] = None
+                    ho_safety_forced_off_count += 1
+
+        ho_blocked_candidate_count = int(
+            self.last_ho_blocked_candidate_count
+        )
+        ho_no_valid_candidate_bs_count = int(
+            self.last_ho_no_valid_candidate_bs_count
+        )
+
+        # Backward-compatible aggregate: number of BSs forced to have no
+        # service because all positive-rate candidates were HO-infeasible,
+        # plus any unexpected safety-guard rejection.
+        ho_forced_off_count = (
+            ho_no_valid_candidate_bs_count
+            + ho_safety_forced_off_count
+        )
 
         tx_power_map_now = {
             bs.bs_id: (float(self.P_max[bs.bs_id]) if bs_selections[bs.bs_id] is not None else 0.0)
@@ -850,7 +925,6 @@ class MAPPOEnvironment:
 
         old_Q_u = self.Q_u.copy()
         old_Z_b = self.Z_b.copy()
-        old_G_u = self.G_u.copy()
 
         # Virtual queue updates.
         for u in self.users:
@@ -865,19 +939,16 @@ class MAPPOEnvironment:
         for u in self.users:
             ue_id = u.ue_id
             h_u = float(handover_flags[ue_id])
-            self.G_u[ue_id] = max(0.0, self.G_u[ue_id] + h_u - self.kappa)
             self.handover_count_per_user[ue_id] += int(h_u)
 
-        # Role-specific user reward with handover virtual queue.
+        # Pure LyMARL user reward: no handover queue and no handover penalty.
         ue_team_reward = float(np.mean([
             old_Q_u[u.ue_id] * served_rates[u.ue_id]
-            - old_G_u[u.ue_id] * handover_flags[u.ue_id]
             for u in self.users
         ]))
         ue_per_user_rewards = {
             u.ue_id: float(
                 old_Q_u[u.ue_id] * served_rates[u.ue_id]
-                - old_G_u[u.ue_id] * handover_flags[u.ue_id]
             )
             for u in self.users
         }
@@ -914,7 +985,6 @@ class MAPPOEnvironment:
             "served_rates": served_rates,
             "Q_u": self.Q_u.copy(),
             "Z_b": self.Z_b.copy(),
-            "G_u": self.G_u.copy(),
             "ue_team_reward": ue_team_reward,
             "ue_per_user_rewards": ue_per_user_rewards,
             "bs_rewards": bs_rewards.copy(),
@@ -949,6 +1019,10 @@ class MAPPOEnvironment:
             "hard_constraint_enabled": bool(self.use_hard_constraint),
             "hard_on_limit": self.hard_on_limit.copy(),
             "hard_ho_limit": int(self.hard_ho_limit),
+            "ho_blocked_candidate_count": int(ho_blocked_candidate_count),
+            "ho_no_valid_candidate_bs_count": int(ho_no_valid_candidate_bs_count),
+            "ho_safety_forced_off_count": int(ho_safety_forced_off_count),
+            "ho_forced_off_count": int(ho_forced_off_count),
         }
 
         done = False
@@ -1476,14 +1550,14 @@ class MAPPOTrainer:
         steps_per_episode: int = 10000,
     ):
         """
-        Episodic LyMARL-HO training.
+        Episodic pure-LyMARL training (no handover queue).
 
         The actor/critic networks, optimizers, and ValueNorm statistics are
         carried across episodes. At every episode boundary, env.reset()
         reinitializes the topology/channel state and all virtual queues using
         the same reset convention as the HAPPO environment:
 
-            Q_u = 0.1, G_u = 0.0, Z_b = 0.0.
+            Q_u = 0.1, Z_b = 0.0.
 
         The final transition of each episode is marked done=True and uses zero
         bootstrap values so GAE does not connect two independent episodes.
@@ -1510,7 +1584,7 @@ class MAPPOTrainer:
         print(f"Total train steps: {n_steps}")
         print(f"Update interval: {update_interval}")
         print(f"Hard constraint during training: {self.env.use_hard_constraint}")
-        print("Queue reset per episode: Q=0.1, G=0.0, Z=0.0")
+        print("Queue reset per episode: Q=0.1, Z=0.0")
         print("=" * 100 + "\n")
 
         throughput_history, fairness_history, slot_rates = [], [], []
@@ -1522,7 +1596,10 @@ class MAPPOTrainer:
         handover_ratio_history, handover_flag_history = [], []
         request_switch_ratio_history, request_switch_flag_history = [], []
         cond_ho_numerator_history, cond_ho_denominator_history = [], []
-        g_queue_history = {u.ue_id: [] for u in self.env.users}
+        ho_blocked_candidate_history = []
+        ho_no_valid_candidate_bs_history = []
+        ho_safety_forced_off_history = []
+        ho_forced_off_history = []
         request_bs_history, serving_bs_history = [], []
         episode_index_history, episode_step_history = [], []
 
@@ -1534,7 +1611,7 @@ class MAPPOTrainer:
             local_obs, global_obs = self.env.reset()
             print(
                 f"\n[EPISODE {episode + 1}/{n_episodes}] "
-                f"reset Q=0.1, G=0.0, Z=0.0"
+                f"reset Q=0.1, Z=0.0"
             )
 
             for episode_step in range(steps_per_episode):
@@ -1595,6 +1672,16 @@ class MAPPOTrainer:
                 ])
                 cond_ho_numerator_history.append(int(info["cond_ho_numerator"]))
                 cond_ho_denominator_history.append(int(info["cond_ho_denominator"]))
+                ho_blocked_candidate_history.append(
+                    int(info["ho_blocked_candidate_count"])
+                )
+                ho_no_valid_candidate_bs_history.append(
+                    int(info["ho_no_valid_candidate_bs_count"])
+                )
+                ho_safety_forced_off_history.append(
+                    int(info["ho_safety_forced_off_count"])
+                )
+                ho_forced_off_history.append(int(info["ho_forced_off_count"]))
                 request_bs_history.append([
                     int(info["current_request_bs"][u.ue_id]) for u in self.env.users
                 ])
@@ -1604,8 +1691,6 @@ class MAPPOTrainer:
                 episode_index_history.append(episode)
                 episode_step_history.append(episode_step)
 
-                for ue_id, g_value in info["G_u"].items():
-                    g_queue_history[ue_id].append(float(g_value))
                 for bs_id, power in info["power_consumed"].items():
                     power_history[bs_id].append(float(power))
                 for ue_id, q_val in info["Q_u"].items():
@@ -1677,7 +1762,10 @@ class MAPPOTrainer:
             "request_switch_flags": request_switch_flag_history,
             "cond_ho_numerator": cond_ho_numerator_history,
             "cond_ho_denominator": cond_ho_denominator_history,
-            "G_u_history": g_queue_history,
+            "ho_blocked_candidate_count": ho_blocked_candidate_history,
+            "ho_no_valid_candidate_bs_count": ho_no_valid_candidate_bs_history,
+            "ho_safety_forced_off_count": ho_safety_forced_off_history,
+            "ho_forced_off_count": ho_forced_off_history,
             "request_bs_history": request_bs_history,
             "serving_bs_history": serving_bs_history,
             "episode_index": episode_index_history,
@@ -1709,7 +1797,10 @@ class MAPPOTrainer:
         handover_ratio_history, handover_flag_history = [], []
         request_switch_ratio_history, request_switch_flag_history = [], []
         cond_ho_numerator_history, cond_ho_denominator_history = [], []
-        g_queue_history = {u.ue_id: [] for u in self.env.users}
+        ho_blocked_candidate_history = []
+        ho_no_valid_candidate_bs_history = []
+        ho_safety_forced_off_history = []
+        ho_forced_off_history = []
         request_bs_history, serving_bs_history = [], []
 
         local_obs, global_obs = self.env.reset()
@@ -1729,11 +1820,19 @@ class MAPPOTrainer:
             request_switch_flag_history.append([float(info["request_switch_flags"][u.ue_id]) for u in self.env.users])
             cond_ho_numerator_history.append(int(info["cond_ho_numerator"]))
             cond_ho_denominator_history.append(int(info["cond_ho_denominator"]))
+            ho_blocked_candidate_history.append(
+                int(info["ho_blocked_candidate_count"])
+            )
+            ho_no_valid_candidate_bs_history.append(
+                int(info["ho_no_valid_candidate_bs_count"])
+            )
+            ho_safety_forced_off_history.append(
+                int(info["ho_safety_forced_off_count"])
+            )
+            ho_forced_off_history.append(int(info["ho_forced_off_count"]))
             request_bs_history.append([int(info["current_request_bs"][u.ue_id]) for u in self.env.users])
             serving_bs_history.append([int(info["current_serving_bs"][u.ue_id]) for u in self.env.users])
 
-            for ue_id, g_value in info["G_u"].items():
-                g_queue_history[ue_id].append(float(g_value))
             for bs_id, power in info["power_consumed"].items():
                 power_history[bs_id].append(float(power))
 
@@ -1795,7 +1894,10 @@ class MAPPOTrainer:
             "request_switch_flags": request_switch_flag_history,
             "cond_ho_numerator": cond_ho_numerator_history,
             "cond_ho_denominator": cond_ho_denominator_history,
-            "G_u_history": g_queue_history,
+            "ho_blocked_candidate_count": ho_blocked_candidate_history,
+            "ho_no_valid_candidate_bs_count": ho_no_valid_candidate_bs_history,
+            "ho_safety_forced_off_count": ho_safety_forced_off_history,
+            "ho_forced_off_count": ho_forced_off_history,
             "request_bs_history": request_bs_history,
             "serving_bs_history": serving_bs_history,
             "kappa": float(self.env.kappa),
@@ -1854,6 +1956,16 @@ class MAPPOTrainer:
             request_switch_flags=np.asarray(results.get("request_switch_flags", []), dtype=np.float32),
             cond_ho_numerator=np.asarray(results.get("cond_ho_numerator", []), dtype=np.float32),
             cond_ho_denominator=np.asarray(results.get("cond_ho_denominator", []), dtype=np.float32),
+            ho_blocked_candidate_count=np.asarray(
+                results.get("ho_blocked_candidate_count", []), dtype=np.int32
+            ),
+            ho_no_valid_candidate_bs_count=np.asarray(
+                results.get("ho_no_valid_candidate_bs_count", []), dtype=np.int32
+            ),
+            ho_safety_forced_off_count=np.asarray(
+                results.get("ho_safety_forced_off_count", []), dtype=np.int32
+            ),
+            ho_forced_off_count=np.asarray(results.get("ho_forced_off_count", []), dtype=np.int32),
             request_bs_history=np.asarray(results.get("request_bs_history", []), dtype=np.int32),
             serving_bs_history=np.asarray(results.get("serving_bs_history", []), dtype=np.int32),
             kappa=np.float32(results.get("kappa", self.env.kappa)),
@@ -2054,7 +2166,7 @@ def summarize_results(root: str, train_seeds, eval_seeds):
             per_train[name].append(float(np.mean(per_eval[name])))
 
     print("\n" + "=" * 96)
-    print("ROLE-SPECIFIC LyMARL-HO FINAL SUMMARY")
+    print("PURE LyMARL FINAL SUMMARY (NO HO QUEUE)")
     print("Each train seed is first averaged over evaluation seeds; mean/std are across train seeds.")
     print("=" * 96)
     for name, values in per_train.items():
@@ -2078,7 +2190,7 @@ def summarize_kappa_results(
     }
 
     print("\n" + "=" * 150)
-    print("LyMARL-HO FINAL SUMMARY")
+    print("PURE LyMARL FINAL SUMMARY (NO HO QUEUE)")
     print(
         "Each train seed is first averaged over evaluation seeds; "
         "mean/std below are across train seeds."
@@ -2086,12 +2198,8 @@ def summarize_kappa_results(
     print("=" * 150)
 
     for kappa in kappa_list:
-        kappa_str = f"{kappa:.3f}".rstrip("0").rstrip(".")
-
-        root = os.path.join(
-            base_root,
-            f"LyMARL_HO_kappa_{kappa_str}",
-        )
+        kappa_tag = f"{kappa:.3f}"
+        root_prefix = f"LyMARL_kappa_{kappa_tag}_seed_"
 
         # train seed별 결과
         per_train = {
@@ -2108,8 +2216,8 @@ def summarize_kappa_results(
 
             for eval_seed in eval_seeds:
                 path = os.path.join(
-                    root,
-                    f"seed_{train_seed}",
+                    base_root,
+                    f"{root_prefix}{train_seed}",
                     f"eval_seed_{eval_seed}.npz",
                 )
 
@@ -2180,108 +2288,101 @@ if __name__ == "__main__":
     TRAIN_STEPS = N_EPISODES * STEPS_PER_EPISODE
     EVAL_STEPS = 10000
 
-    KAPPA_LIST = [0.01, 0.015, 0.02, 0.03]
+    # Pure LyMARL is trained without a handover queue or handover cost.
+    # kappa is used only during hard evaluation. Exhausted HO candidates are
+    # filtered per UE-BS pair; a BS is forced to NONE/OFF only when no valid
+    # requesting candidate remains (or its energy budget is exhausted).
+    KAPPA_LIST = [0.010]
 
     UPDATE_INTERVAL = 128
-    BASE_SAVE_ROOT = "results/results_mappo_happo"
+    BASE_SAVE_ROOT = "results/results_kappa"
     OVERWRITE_EXISTING = False
 
-    for kappa in KAPPA_LIST:
-        print("\n" + "=" * 110)
-        print(f"START KAPPA = {kappa}")
-        print("=" * 110)
-
-        kappa_str = f"{kappa:.3f}".rstrip("0").rstrip(".")
-
-        save_root = os.path.join(
+    for train_seed in TRAIN_SEEDS:
+        train_kappa = KAPPA_LIST[0]
+        train_dir = os.path.join(
             BASE_SAVE_ROOT,
-            f"LyMARL_HO_kappa_{kappa_str}"
+            f"LyMARL_kappa_{train_kappa:.3f}_seed_{train_seed}",
         )
-        os.makedirs(save_root, exist_ok=True)
+        os.makedirs(train_dir, exist_ok=True)
 
-        # for train_seed in TRAIN_SEEDS:
-        #     seed_dir = os.path.join(save_root, f"seed_{train_seed}")
-        #     os.makedirs(seed_dir, exist_ok=True)
+        model_path = os.path.join(train_dir, "model.pt")
+        train_npz_path = os.path.join(train_dir, "train.npz")
 
-        #     model_path = os.path.join(seed_dir, "model.pt")
-        #     train_npz_path = os.path.join(seed_dir, "train.npz")
+        if OVERWRITE_EXISTING or not os.path.exists(model_path):
+            print(
+                "\n"
+                + "#" * 100
+                + f"\nPURE LyMARL | TRAIN SEED={train_seed}\n"
+                + "#" * 100
+            )
 
-        #     if OVERWRITE_EXISTING or not os.path.exists(model_path):
-        #         print(
-        #             "\n"
-        #             + "#" * 100
-        #             + f"\nKAPPA={kappa} | TRAIN SEED={train_seed}\n"
-        #             + "#" * 100
-        #         )
+            train_env = build_env(
+                seed=train_seed,
+                use_hard_constraint=False,
+                kappa=train_kappa,
+            )
+            trainer = build_trainer(train_env)
 
-        #         train_env = build_env(train_seed, use_hard_constraint=False, kappa=kappa,)
-        #         trainer = build_trainer(train_env)
+            trainer.train(
+                n_steps=TRAIN_STEPS,
+                update_interval=UPDATE_INTERVAL,
+                save_npz_path=train_npz_path,
+                steps_per_episode=STEPS_PER_EPISODE,
+            )
+            trainer.save_model(model_path)
+        else:
+            print(f"[SKIP TRAIN] Existing model: {model_path}")
 
-        #         trainer.train(
-        #             n_steps=TRAIN_STEPS,
-        #             update_interval=UPDATE_INTERVAL,
-        #             save_npz_path=train_npz_path,
-        #             steps_per_episode=STEPS_PER_EPISODE,
-        #         )
+        for kappa in KAPPA_LIST:
+            eval_dir = os.path.join(
+                BASE_SAVE_ROOT,
+                f"LyMARL_kappa_{kappa:.3f}_seed_{train_seed}",
+            )
+            os.makedirs(eval_dir, exist_ok=True)
 
-        #         trainer.save_model(model_path)
+            for eval_seed in EVAL_SEEDS:
+                eval_path = os.path.join(
+                    eval_dir,
+                    f"eval_seed_{eval_seed}.npz",
+                )
 
-        #     else:
-        #         print(
-        #             f"[SKIP TRAIN] Existing model: {model_path}"
-        #         )
+                if (
+                    not OVERWRITE_EXISTING
+                    and os.path.exists(eval_path)
+                ):
+                    print(f"[SKIP EVAL] Existing result: {eval_path}")
+                    continue
 
-        #     for eval_seed in EVAL_SEEDS:
-        #         eval_path = os.path.join(
-        #             seed_dir,
-        #             f"eval_seed_{eval_seed}.npz"
-        #         )
+                print(
+                    f"\n[EVAL] Pure LyMARL | "
+                    f"kappa={kappa:.3f}, "
+                    f"train_seed={train_seed}, "
+                    f"eval_seed={eval_seed}"
+                )
 
-        #         if (
-        #             not OVERWRITE_EXISTING
-        #             and os.path.exists(eval_path)
-        #         ):
-        #             print(
-        #                 f"[SKIP EVAL] Existing result: {eval_path}"
-        #             )
-        #             continue
+                eval_env = build_env(
+                    seed=eval_seed,
+                    use_hard_constraint=True,
+                    kappa=kappa,
+                )
+                eval_trainer = build_trainer(eval_env)
+                eval_trainer.load_model(
+                    model_path,
+                    load_optim=False,
+                )
 
-        #         print(
-        #             f"\n[EVAL] "
-        #             f"kappa={kappa}, "
-        #             f"train_seed={train_seed}, "
-        #             f"eval_seed={eval_seed}"
-        #         )
+                set_seed(eval_seed)
+                eval_trainer.evaluate(
+                    EVAL_STEPS,
+                    eval_path,
+                    imperfect_csi=False,
+                    csi_error_var=0.0,
+                )
 
-        #         eval_env = build_env(
-        #             eval_seed,
-        #             use_hard_constraint=True,
-        #             kappa=kappa,
-        #         )
-
-        #         eval_trainer = build_trainer(eval_env)
-        #         eval_trainer.load_model(
-        #             model_path,
-        #             load_optim=False,
-        #         )
-
-        #         set_seed(eval_seed)
-
-        #         eval_trainer.evaluate(
-        #             EVAL_STEPS,
-        #             eval_path,
-        #             imperfect_csi=False,
-        #             csi_error_var=0.0,
-        #         )
-
-        # summarize_results(
-        #     save_root,
-        #     TRAIN_SEEDS,
-        #     EVAL_SEEDS,
-        # )
-        summarize_kappa_results(
-            base_root=BASE_SAVE_ROOT,
-            kappa_list=KAPPA_LIST,
-            train_seeds=TRAIN_SEEDS,
-            eval_seeds=EVAL_SEEDS,
-        )
+    summarize_kappa_results(
+        base_root=BASE_SAVE_ROOT,
+        kappa_list=KAPPA_LIST,
+        train_seeds=TRAIN_SEEDS,
+        eval_seeds=EVAL_SEEDS,
+    )
