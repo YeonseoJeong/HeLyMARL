@@ -35,14 +35,14 @@ NUM_USERS = 20
 NUM_BS = 3
 
 POWER_BUDGET_RATIO = 0.6
-KAPPA = 0.03
+KAPPA = 0.015
 
 HELYMARL_V = 5.0
 HELYMARL_LAMBDA_E = 0.0
 
 OVERWRITE_EXISTING = False
 
-SAVE_ROOT = "results/results_multi_seed"
+SAVE_ROOT = "results/results_baselines"
 os.makedirs(SAVE_ROOT, exist_ok=True)
 
 
@@ -1817,9 +1817,9 @@ if __name__ == "__main__":
     algorithms = [
         "DDPP",
         "MaxSNR",
-        "PF-HAPPO",
-        "Jensen-HAPPO",
-        "HeLyMARL",
+        # "PF-HAPPO",
+        # "Jensen-HAPPO",
+        # "HeLyMARL",
     ]
     model_based_algorithms = {
         "PF-HAPPO",

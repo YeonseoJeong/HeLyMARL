@@ -42,7 +42,7 @@ TARGET_ON_RATIO = 0.6
 
 # 평균 ± BAND_SCALE × 표준편차
 BAND_SCALE = 1.0
-BAND_ALPHA = 0.10
+BAND_ALPHA = 0.05
 
 SELECTED_TRAIN_SEED = 0
 
@@ -745,7 +745,7 @@ ax.axhline(
     linewidth=1.8,
     color="black",
     alpha=0.8,
-    label=rf"Target $\rho={TARGET_ON_RATIO:g}$",
+    label=rf"Target $\eta={TARGET_ON_RATIO:g}$",
     zorder=2,
 )
 

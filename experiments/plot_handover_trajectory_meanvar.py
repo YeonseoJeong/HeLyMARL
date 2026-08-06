@@ -22,6 +22,7 @@ NPZ_FILES = {
     ),
 }
 
+
 # HeLyMARL은 summary npz 한 개가 아니라 아래 raw evaluation 파일에서 읽음:
 # results/results_kappa/HAPPO_kappa_0.030_seed_{train_seed}/eval_seed_{eval_seed}.npz
 HELYMARL_RAW_ROOT = "results/results_kappa"
@@ -38,7 +39,7 @@ SAVE_DIR = "eval_compare_plots"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 MAX_STEPS = 10000
-TARGET_KAPPA = 0.03
+TARGET_KAPPA = 0.030
 
 # cumulative ratio 자체가 이미 smoothing 효과가 있으므로
 # 추가 moving average는 기본적으로 사용하지 않음

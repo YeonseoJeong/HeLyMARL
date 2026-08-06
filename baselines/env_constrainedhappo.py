@@ -25,6 +25,7 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         *args,
         eta_mu: float = 0.01,
         eta_nu: float = 0.01,
+        total_train_episodes: int = 30,
         mu_max: float = 100.0,
         nu_max: float = 100.0,
         use_dimensionless: bool = True,
@@ -41,6 +42,7 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         self.eta_nu = float(eta_nu)
         self.mu_max = float(mu_max)
         self.nu_max = float(nu_max)
+        self.total_train_episodes = int(total_train_episodes)
 
         self.rate_eps = 1e-6
         self.episode_length = int(episode_length) if episode_length is not None else int(self.hard_window_len)
@@ -74,6 +76,9 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         }
 
         self.episode_idx = 0
+
+        self.H_max_u = {u.ue_id: int(np.floor(self.kappa * max(self.episode_length - 1, 1))) for u in self.users}
+        self.H_bar_u = {u.ue_id: (self.H_max_u[u.ue_id] / float(self.episode_length)) for u in self.users}
 
     def reset(self):
         obs = super().reset()
@@ -114,6 +119,12 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
     def reset_dual_variables(self):
         self.mu_E_b = {bs.bs_id: 0.0 for bs in self.base_stations}
         self.nu_H_u = {u.ue_id: 0.0 for u in self.users}
+        self.episode_idx = 0
+
+        self.mu_E_b_history = []
+        self.nu_H_u_history = []
+        self.C_E_b_history = []
+        self.C_H_u_history = []
     
     def _compute_utility(self, served_rates: Dict[int, float]) -> float:
         """
@@ -131,13 +142,16 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
     
     def _remaining_handover_ratio(self, ue_id: int) -> float:
         used_ho = float(self.episode_ho_count[ue_id])
-        max_ho = max(1.0, self.kappa * max(self.episode_length-1,1),)
-        return float(np.clip((max_ho - used_ho) / max_ho, 0.0, 1.0))
+        # max_ho = max(1.0, self.kappa * max(self.episode_length-1,1),)
+        max_ho = float(max(1.0, self.H_max_u[ue_id],))
+        # return float(np.clip((max_ho - used_ho) / max_ho, 0.0, 1.0))
+        return float((max_ho - used_ho) / max_ho if max_ho != 0 else 0)
 
     def _remaining_energy_ratio(self, bs_id: int) -> float:
         used_on = float(self.episode_on_count[bs_id])
         max_on = max(1.0, self.power_budget_ratio * self.episode_length)
-        return float(np.clip((max_on - used_on) / max_on, 0.0, 1.0))
+        return float((max_on - used_on) / max_on if max_on != 0 else 0)
+        # return float(np.clip((max_on - used_on) / max_on, 0.0, 1.0))
     
     def _get_local_observation_by_index(self, ui: int) -> np.ndarray:
         ue = self.users[ui]
@@ -340,8 +354,8 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
         return local_obs, global_obs, info, done
     
     def _update_dual_variables_episode(self):
-        beta_mu_k = self.eta_mu / np.sqrt(self.episode_idx + 1)
-        beta_nu_k = self.eta_nu / np.sqrt(self.episode_idx + 1)
+        beta_mu_k = self.eta_mu / np.sqrt(self.total_train_episodes)
+        beta_nu_k = self.eta_nu / np.sqrt(self.total_train_episodes)
 
         C_E_list = []
 
@@ -366,11 +380,12 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
             C_E = avg_cost - budget
             C_E_list.append(C_E)
 
-            self.mu_E_b[bs_id] = float(np.clip(
-                self.mu_E_b[bs_id] + beta_mu_k * C_E,
-                0.0,
-                self.mu_max,
-            ))
+            # self.mu_E_b[bs_id] = float(np.clip(
+            #     self.mu_E_b[bs_id] + beta_mu_k * C_E,
+            #     0.0,
+            #     self.mu_max,
+            # ))
+            self.mu_E_b[bs_id] = float(max(0.0, self.mu_E_b[bs_id] + beta_mu_k * C_E))
 
         C_H_list = []
 
@@ -382,14 +397,15 @@ class ConstrainedHAPPOEnvironment(HAPPOEnvironment):
             else:
                 ho_ratio = float(np.mean(self.episode_ho_hist[ue_id]))
 
-            C_H = ho_ratio - self.kappa
+            C_H = (ho_ratio - self.H_bar_u[ue_id])
             C_H_list.append(C_H)
 
-            self.nu_H_u[ue_id] = float(np.clip(
-                self.nu_H_u[ue_id] + beta_nu_k * C_H,
-                0.0,
-                self.nu_max,
-            ))
+            # self.nu_H_u[ue_id] = float(np.clip(
+            #     self.nu_H_u[ue_id] + beta_nu_k * C_H,
+            #     0.0,
+            #     self.nu_max,
+            # ))
+            self.nu_H_u[ue_id] = float(max(0.0, self.nu_H_u[ue_id] + beta_nu_k * C_H))
 
         self.mu_E_b_history.append(np.array([self.mu_E_b[bs.bs_id] for bs in self.base_stations], dtype=np.float32))
         self.nu_H_u_history.append(np.array([self.nu_H_u[u.ue_id] for u in self.users], dtype=np.float32))
